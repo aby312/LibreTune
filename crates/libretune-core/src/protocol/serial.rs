@@ -135,20 +135,34 @@ pub fn configure_port(port: &mut dyn SerialPort) -> Result<(), ProtocolError> {
     port.set_flow_control(serialport::FlowControl::None)
         .map_err(|e| ProtocolError::SerialError(e.to_string()))?;
 
-    // Set DTR high to maintain connection and prevent Arduino-based ECU reset
-    // Opening a serial port typically toggles DTR which triggers bootloader reset
-    // Keeping DTR asserted prevents this and maintains stable connection
-    if let Err(e) = port.write_data_terminal_ready(true) {
-        tracing::debug!("configure_port: failed to set DTR high: {} (continuing)", e);
+    // Deassert DTR so opening the port does not reset the ECU.
+    //
+    // On Arduino-derived boards — which covers most Speeduino hardware — the
+    // DTR line is capacitor-coupled to RESET, so asserting it pulses the board
+    // into reset. That is how the bootloader is normally entered.
+    //
+    // This previously asserted DTR, with a comment claiming that *prevented*
+    // the reset. It does the opposite. Observed on a Speeduino 2025.01:
+    // connecting reset the ECU every time, which is why a handshake sent
+    // immediately after opening the port was lost, and — the reason this
+    // matters beyond timing — **connecting while the engine was running
+    // stopped the engine**. TunerStudio connects to the same board without
+    // disturbing it.
+    //
+    // Deasserting also leaves the reset line alone for boards that do not use
+    // the auto-reset circuit at all, so this is not Arduino-specific.
+    if let Err(e) = port.write_data_terminal_ready(false) {
+        tracing::debug!("configure_port: failed to clear DTR: {} (continuing)", e);
     } else {
-        tracing::debug!("configure_port: DTR set high");
+        tracing::debug!("configure_port: DTR deasserted (no ECU reset)");
     }
 
-    // Set RTS high for proper flow control signaling
-    if let Err(e) = port.write_request_to_send(true) {
-        tracing::debug!("configure_port: failed to set RTS high: {} (continuing)", e);
+    // Likewise for RTS: some USB-serial adaptors wire it to reset as well, and
+    // flow control is disabled above, so nothing needs it asserted.
+    if let Err(e) = port.write_request_to_send(false) {
+        tracing::debug!("configure_port: failed to clear RTS: {} (continuing)", e);
     } else {
-        tracing::debug!("configure_port: RTS set high");
+        tracing::debug!("configure_port: RTS deasserted");
     }
 
     Ok(())
