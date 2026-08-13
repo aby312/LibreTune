@@ -23,6 +23,30 @@ interface Progress {
   appliedValue: number;
   baselineValue: number;
   message: string;
+  measuredDelayMs?: number;
+  measuredRpm?: number;
+  measuredLoad?: number;
+  rejection?: string;
+}
+
+interface DelayCell {
+  n: number;
+  mean_ms: number;
+  range_ms: number;
+}
+
+interface DelayTable {
+  rpm_edges: number[];
+  load_edges: number[];
+  /** cells[load_bin][rpm_bin] */
+  cells: DelayCell[][];
+}
+
+/** Human label for a bin: "<edge", "a-b", or "edge+" for the open top bin. */
+function binLabel(edges: number[], i: number, unit: string): string {
+  if (i === 0) return `<${edges[0]}${unit}`;
+  if (i >= edges.length) return `${edges[edges.length - 1]}${unit}+`;
+  return `${edges[i - 1]}-${edges[i]}${unit}`;
 }
 
 interface Props {
@@ -40,11 +64,36 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [delayTable, setDelayTable] = useState<DelayTable | null>(null);
+
+  const refreshTable = useCallback(async () => {
+    try {
+      setDelayTable(await invoke<DelayTable>('get_afr_delay_table'));
+    } catch { /* command unavailable — leave the table hidden */ }
+  }, []);
 
   useEffect(() => {
-    const un = listen<Progress>('afr_delay_test:progress', (e) => setProgress(e.payload));
+    const un = listen<Progress>('afr_delay_test:progress', (e) => {
+      setProgress(e.payload);
+      // A settling event carries this step's measurement (or rejection) —
+      // refresh the aggregate table so the grid fills in live.
+      if (e.payload.phase === 'settling' || e.payload.phase === 'complete') {
+        refreshTable();
+      }
+    });
     return () => { un.then((f) => f()); };
-  }, []);
+  }, [refreshTable]);
+
+  useEffect(() => {
+    if (isOpen) refreshTable();
+  }, [isOpen, refreshTable]);
+
+  const clearSamples = useCallback(async () => {
+    try {
+      await invoke('clear_afr_delay_samples');
+      await refreshTable();
+    } catch { /* best effort */ }
+  }, [refreshTable]);
 
   const start = useCallback(async () => {
     setError(null);
@@ -148,6 +197,55 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
                 {progress.phase === 'enriching' && ` -> applying ${progress.appliedValue.toFixed(1)} ms`}
               </div>
             )}
+            {progress.measuredDelayMs !== undefined && (
+              <div className="afr-delay-measured">
+                Measured: <strong>{Math.round(progress.measuredDelayMs)} ms</strong>
+                {progress.measuredRpm !== undefined && progress.measuredLoad !== undefined &&
+                  ` @ ${Math.round(progress.measuredRpm)} rpm / ${Math.round(progress.measuredLoad)} load`}
+              </div>
+            )}
+            {progress.rejection && (
+              <div className="afr-delay-rejection">No measurement: {progress.rejection}</div>
+            )}
+          </div>
+        )}
+
+        {delayTable && delayTable.cells.some((row) => row.some((c) => c.n > 0)) && (
+          <div className="afr-delay-table">
+            <div className="afr-delay-table-head">
+              <span>Measured delay by operating point (ms, mean · n)</span>
+              <button type="button" disabled={running} onClick={clearSamples}>Clear</button>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>load \ rpm</th>
+                  {delayTable.cells[0].map((_, r) => (
+                    <th key={r}>{binLabel(delayTable.rpm_edges, r, '')}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {/* High load on top, like a VE table. */}
+                {[...delayTable.cells].reverse().map((row, revI) => {
+                  const l = delayTable.cells.length - 1 - revI;
+                  return (
+                    <tr key={l}>
+                      <th>{binLabel(delayTable.load_edges, l, '')}</th>
+                      {row.map((c, r) => (
+                        <td
+                          key={r}
+                          className={c.n > 0 ? 'has-data' : 'no-data'}
+                          title={c.n > 0 ? `range ${Math.round(c.range_ms)} ms over ${c.n} steps` : 'no samples'}
+                        >
+                          {c.n > 0 ? `${Math.round(c.mean_ms)} · ${c.n}` : '—'}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
 

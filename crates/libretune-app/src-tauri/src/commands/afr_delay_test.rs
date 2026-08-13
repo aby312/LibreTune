@@ -33,8 +33,11 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+use libretune_core::autotune::delay_measure::{detect_delay, AfrSample, DelayTable};
 
 use crate::state::AppState;
 
@@ -71,6 +74,41 @@ pub struct DelayTestProgress {
     pub applied_value: f64,
     pub baseline_value: f64,
     pub message: String,
+    /// Measured transport delay for the step just completed, when the AFR
+    /// trace supported one. Absent on phases other than "settling".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_delay_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_rpm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_load: Option<f64>,
+    /// Why no delay was measured for this step (operator-facing label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
+}
+
+impl DelayTestProgress {
+    fn plain(
+        phase: &str,
+        step: u32,
+        total_steps: u32,
+        applied_value: f64,
+        baseline_value: f64,
+        message: String,
+    ) -> Self {
+        Self {
+            phase: phase.into(),
+            step,
+            total_steps,
+            applied_value,
+            baseline_value,
+            message,
+            measured_delay_ms: None,
+            measured_rpm: None,
+            measured_load: None,
+            rejection: None,
+        }
+    }
 }
 
 fn emit(app: &AppHandle, p: DelayTestProgress) {
@@ -113,12 +151,113 @@ async fn sleep_abortable(total_ms: u64) -> bool {
     abort_flag().load(Ordering::SeqCst)
 }
 
+/// Delay measurements accumulated across runs: (rpm, load, delay_ms).
+/// Session-scoped by design — a delay map belongs to one engine/exhaust
+/// combination; clearing is explicit via [`clear_afr_delay_samples`].
+static DELAY_SAMPLES: std::sync::OnceLock<StdMutex<Vec<(f64, f64, f64)>>> =
+    std::sync::OnceLock::new();
+
+fn delay_samples() -> &'static StdMutex<Vec<(f64, f64, f64)>> {
+    DELAY_SAMPLES.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+/// Realtime channels the sampler needs, resolved once per run from a live
+/// snapshot's keys (INI channel naming varies across dialects).
+struct SampleChannels {
+    afr: String,
+    rpm: Option<String>,
+    load: Option<String>,
+}
+
+fn resolve_sample_channels(
+    snapshot: &std::collections::HashMap<String, f64>,
+) -> Option<SampleChannels> {
+    let find_exact = |want: &str| {
+        snapshot
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(want))
+            .cloned()
+    };
+    let afr = find_exact("afr")
+        .or_else(|| {
+            snapshot
+                .keys()
+                .find(|k| {
+                    let l = k.to_ascii_lowercase();
+                    l.contains("afr") && !l.contains("target") && !l.contains("protect")
+                })
+                .cloned()
+        })
+        .or_else(|| find_exact("lambda"))
+        .or_else(|| find_exact("o2"))?;
+    Some(SampleChannels {
+        afr,
+        rpm: find_exact("rpm"),
+        // MAP in kPa preferred as the load axis; TPS is the fallback.
+        load: find_exact("map").or_else(|| find_exact("tps")),
+    })
+}
+
+/// Sample AFR (and remember the latest rpm/load) for `total_ms`, checking the
+/// abort flag between samples exactly like [`sleep_abortable`]. Each sample is
+/// a live single-shot read that serializes with the realtime stream on the
+/// connection lock, giving ~15-20 Hz effective — adequate for transport delays
+/// of 100-500 ms. Read failures skip the sample rather than aborting the run
+/// (a short trace downgrades to a rejection, not an error).
+///
+/// Returns true if an abort was requested during the window.
+async fn sample_window(
+    state: &tauri::State<'_, AppState>,
+    epoch: Instant,
+    channels: Option<&SampleChannels>,
+    total_ms: u64,
+    out: &mut Vec<AfrSample>,
+    last_point: &mut (Option<f64>, Option<f64>),
+) -> bool {
+    const TICK_MS: u64 = 30;
+    let end = epoch.elapsed().as_millis() as u64 + total_ms;
+    loop {
+        if abort_flag().load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = epoch.elapsed().as_millis() as u64;
+        if now >= end {
+            return abort_flag().load(Ordering::SeqCst);
+        }
+        if let Some(ch) = channels {
+            if let Ok(snap) = crate::commands::realtime_get::get_realtime_data(state.clone()).await
+            {
+                let t_ms = epoch.elapsed().as_millis() as u64;
+                if let Some(afr) = snap.get(&ch.afr) {
+                    out.push(AfrSample { t_ms, afr: *afr });
+                }
+                if let Some(rpm_key) = &ch.rpm {
+                    if let Some(v) = snap.get(rpm_key) {
+                        last_point.0 = Some(*v);
+                    }
+                }
+                if let Some(load_key) = &ch.load {
+                    if let Some(v) = snap.get(load_key) {
+                        last_point.1 = Some(*v);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+    }
+}
+
 /// Run an automated series of enrichment steps.
 ///
 /// `step_percent` is clamped to [`MIN_STEP_PERCENT`]..=[`MAX_STEP_PERCENT`] and
 /// forced positive. `hold_ms` is how long the enrichment is applied;
 /// `settle_ms` is the pause afterwards for the mixture to return to baseline
 /// before the next step.
+///
+/// Each step now also measures the AFR transport delay: a short pre-roll
+/// establishes the baseline, the hold window is sampled live, and the edge is
+/// extracted by [`detect_delay`]. Successful measurements accumulate into the
+/// session's rpm×load delay table ([`get_afr_delay_table`]).
 #[tauri::command]
 pub async fn run_afr_delay_test(
     app: AppHandle,
@@ -162,19 +301,32 @@ pub async fn run_afr_delay_test(
 
     abort_flag().store(false, Ordering::SeqCst);
 
+    // One clock for the whole run: sample timestamps and step anchors must be
+    // comparable for the delay extraction.
+    let epoch = Instant::now();
+
+    // Resolve the AFR/rpm/load channel names once from a live snapshot. When
+    // unavailable (offline, or no AFR channel in this INI) the run proceeds as
+    // a plain step test and every step reports a rejection instead of a delay.
+    let channels = crate::commands::realtime_get::get_realtime_data(state.clone())
+        .await
+        .ok()
+        .as_ref()
+        .and_then(resolve_sample_channels);
+
     emit(
         &app,
-        DelayTestProgress {
-            phase: "starting".into(),
-            step: 0,
-            total_steps: repeats,
-            applied_value: enriched,
-            baseline_value: baseline,
-            message: format!(
+        DelayTestProgress::plain(
+            "starting",
+            0,
+            repeats,
+            enriched,
+            baseline,
+            format!(
                 "{FUEL_CONSTANT} {baseline:.1} -> {enriched:.1} ({step_percent:.1}% richer), \
                  {repeats} steps, {hold_ms} ms hold. RAM only, never burned."
             ),
-        },
+        ),
     );
 
     // Anything that leaves this function must first put `baseline` back. The
@@ -188,6 +340,9 @@ pub async fn run_afr_delay_test(
         .await
     }
 
+    /// Baseline window sampled immediately before each enrichment write.
+    const PRE_ROLL_MS: u64 = 600;
+
     let mut completed = 0u32;
     for step in 1..=repeats {
         if abort_flag().load(Ordering::SeqCst) {
@@ -196,15 +351,32 @@ pub async fn run_afr_delay_test(
 
         emit(
             &app,
-            DelayTestProgress {
-                phase: "enriching".into(),
+            DelayTestProgress::plain(
+                "enriching",
                 step,
-                total_steps: repeats,
-                applied_value: enriched,
-                baseline_value: baseline,
-                message: format!("step {step}/{repeats}: hold steady"),
-            },
+                repeats,
+                enriched,
+                baseline,
+                format!("step {step}/{repeats}: hold steady"),
+            ),
         );
+
+        // Baseline trace for this step's delay extraction (abort-aware, like
+        // every other wait in the run).
+        let mut pre = Vec::new();
+        let mut point = (None, None);
+        if sample_window(
+            &state,
+            epoch,
+            channels.as_ref(),
+            PRE_ROLL_MS,
+            &mut pre,
+            &mut point,
+        )
+        .await
+        {
+            break;
+        }
 
         if let Err(e) = crate::commands::constant_update::update_constant(
             state.clone(),
@@ -225,10 +397,23 @@ pub async fn run_afr_delay_test(
             });
         }
 
-        // Abort-aware hold: an abort mid-hold falls straight through to the
-        // restore below, so the enrichment is cut short rather than held for
-        // the remainder of `hold_ms`.
-        let aborted_mid_hold = sleep_abortable(hold_ms).await;
+        // The anchor is the instant the enriched value finished writing; the
+        // measured delay is wire->combustion->transport->sensor from here.
+        let anchor_ms = epoch.elapsed().as_millis() as u64;
+
+        // Abort-aware hold, sampling AFR throughout: an abort mid-hold falls
+        // straight through to the restore below, so the enrichment is cut
+        // short rather than held for the remainder of `hold_ms`.
+        let mut post = Vec::new();
+        let aborted_mid_hold = sample_window(
+            &state,
+            epoch,
+            channels.as_ref(),
+            hold_ms,
+            &mut post,
+            &mut point,
+        )
+        .await;
 
         if let Err(e) = restore(&state, baseline).await {
             return Err(format!(
@@ -245,17 +430,50 @@ pub async fn run_afr_delay_test(
 
         completed = step;
 
-        emit(
-            &app,
-            DelayTestProgress {
-                phase: "settling".into(),
-                step,
-                total_steps: repeats,
-                applied_value: baseline,
-                baseline_value: baseline,
-                message: format!("step {step}/{repeats} done, settling"),
-            },
+        // Extract this step's transport delay from the sampled traces.
+        let measurement = if channels.is_some() {
+            Some(detect_delay(anchor_ms, &pre, &post))
+        } else {
+            None
+        };
+
+        let mut settling = DelayTestProgress::plain(
+            "settling",
+            step,
+            repeats,
+            baseline,
+            baseline,
+            format!("step {step}/{repeats} done, settling"),
         );
+        match measurement {
+            Some(Ok(m)) => {
+                let (rpm, load) = point;
+                if let (Some(rpm), Some(load)) = (rpm, load) {
+                    delay_samples()
+                        .lock()
+                        .map(|mut v| v.push((rpm, load, m.delay_ms)))
+                        .ok();
+                }
+                settling.measured_delay_ms = Some(m.delay_ms);
+                settling.measured_rpm = rpm;
+                settling.measured_load = load;
+                settling.message = format!(
+                    "step {step}/{repeats}: delay {:.0} ms (AFR moved {:.2}), settling",
+                    m.delay_ms, m.excursion
+                );
+            }
+            Some(Err(rej)) => {
+                settling.rejection = Some(rej.label().to_string());
+                settling.message = format!(
+                    "step {step}/{repeats}: no measurement ({}), settling",
+                    rej.label()
+                );
+            }
+            None => {
+                settling.rejection = Some("no AFR channel / offline".to_string());
+            }
+        }
+        emit(&app, settling);
 
         if step < repeats && sleep_abortable(settle_ms).await {
             break;
@@ -280,17 +498,42 @@ pub async fn run_afr_delay_test(
 
     emit(
         &app,
-        DelayTestProgress {
-            phase: if aborted { "aborted" } else { "complete" }.into(),
-            step: completed,
-            total_steps: repeats,
-            applied_value: baseline,
-            baseline_value: baseline,
-            message: summary.clone(),
-        },
+        DelayTestProgress::plain(
+            if aborted { "aborted" } else { "complete" },
+            completed,
+            repeats,
+            baseline,
+            baseline,
+            summary.clone(),
+        ),
     );
 
     Ok(summary)
+}
+
+/// The session's accumulated rpm×load delay table, aggregated from every
+/// successful step measurement since the last clear.
+#[tauri::command]
+pub async fn get_afr_delay_table() -> Result<DelayTable, String> {
+    let samples = delay_samples()
+        .lock()
+        .map_err(|_| "delay sample store poisoned".to_string())?;
+    let mut table = DelayTable::new();
+    for (rpm, load, delay_ms) in samples.iter() {
+        table.add(*rpm, *load, *delay_ms);
+    }
+    Ok(table)
+}
+
+/// Discard all accumulated delay measurements (e.g. after exhaust or sensor
+/// changes that invalidate the map).
+#[tauri::command]
+pub async fn clear_afr_delay_samples() -> Result<(), String> {
+    delay_samples()
+        .lock()
+        .map_err(|_| "delay sample store poisoned".to_string())?
+        .clear();
+    Ok(())
 }
 
 #[cfg(test)]

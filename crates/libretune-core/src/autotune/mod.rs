@@ -15,6 +15,7 @@
 
 pub mod accel_enrich;
 pub mod anomaly;
+pub mod delay_measure;
 pub mod health;
 pub mod predictor;
 

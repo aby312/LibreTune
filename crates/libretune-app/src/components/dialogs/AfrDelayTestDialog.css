@@ -166,3 +166,49 @@
   font-size: 0.95rem;
   font-weight: 600;
 }
+
+.afr-delay-measured {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--accent-color, #4caf50);
+}
+
+.afr-delay-rejection {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.afr-delay-table {
+  margin-top: 12px;
+}
+
+.afr-delay-table-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  opacity: 0.85;
+  margin-bottom: 4px;
+}
+
+.afr-delay-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.afr-delay-table th,
+.afr-delay-table td {
+  border: 1px solid var(--border-color, #333);
+  padding: 2px 6px;
+  text-align: center;
+}
+
+.afr-delay-table td.no-data {
+  opacity: 0.35;
+}
+
+.afr-delay-table td.has-data {
+  font-weight: 600;
+}
