@@ -70,6 +70,38 @@ mod tests {
 /// Recommendations remain available until explicitly cleared.
 ///
 /// Returns: Nothing on success
+/// Whether an AutoTune session is live, and against which tables.
+///
+/// The session runs in the backend and survives the AutoTune view unmounting
+/// (e.g. switching to the dashboard and back). The view calls this on mount to
+/// re-attach instead of assuming no session exists.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutotuneStatus {
+    pub running: bool,
+    pub table_name: Option<String>,
+    pub secondary_table_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_autotune_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<AutotuneStatus, String> {
+    let config_guard = state.autotune_config.lock().await;
+    Ok(match config_guard.as_ref() {
+        Some(config) => AutotuneStatus {
+            running: true,
+            table_name: Some(config.table_name.clone()),
+            secondary_table_name: config.secondary_table_name.clone(),
+        },
+        None => AutotuneStatus {
+            running: false,
+            table_name: None,
+            secondary_table_name: None,
+        },
+    })
+}
+
 #[tauri::command]
 pub async fn stop_autotune(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.autotune_state.lock().await;
