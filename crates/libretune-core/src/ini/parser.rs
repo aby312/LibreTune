@@ -542,6 +542,19 @@ fn merge_definitions(target: &mut EcuDefinition, source: EcuDefinition) {
 /// Note: '#' is handled at the line level for preprocessor directives
 /// Special case: Don't strip semicolons in field names before '=' (for help text syntax)
 fn strip_comment(line: &str) -> String {
+    // A line whose first non-whitespace character is ';' is a comment in its
+    // entirety, including commented-out properties like ";name = value".
+    // The help-text branch below intentionally keeps semicolons that appear
+    // before '=', but that syntax is "fieldname;+help" — it always has a field
+    // name in front. Without this guard a commented-out property survives
+    // stripping and is parsed as a real entry whose name is the empty string
+    // (extract_help_text slices [..0]). In the stock Speeduino INI that turns
+    // 148 commented-out lines into live properties, and writes a junk
+    // <entry name=""/> into every saved tune's constant manifest.
+    if line.trim_start().starts_with(';') {
+        return String::new();
+    }
+
     // First pass: Check if line contains '=' (outside quotes)
     // This allows us to distinguish between properties (key=val) and other lines (headers, directives)
     let mut has_equals = false;
@@ -3738,6 +3751,41 @@ indicator = { (tps > tpsflood) && (rpm < crankRPM) }, "FLOOD OFF", "FLOOD CLEAR"
         let (name, help) = extract_help_text("  field_name  ;  +  Help text with spaces  ");
         assert_eq!(name, "field_name");
         assert_eq!(help, Some("Help text with spaces".to_string()));
+    }
+
+    #[test]
+    fn test_commented_out_property_is_not_a_property() {
+        // A commented-out property must be stripped entirely. The stock
+        // Speeduino INI carries a disabled alternative for fuelLoadBins; before
+        // this was handled, the leading ';' was preserved (because the line
+        // contains '=') and the entry parsed with an empty name.
+        assert_eq!(
+            strip_comment(
+                "      ;fuelLoadBins = array,  U08,   272, [  16], \"kPa\", 2.0, 0.0, 0.0, 511.0, 0"
+            ),
+            ""
+        );
+
+        // Documentation/template comments in INI headers are also properties
+        // syntactically, and must stay comments.
+        assert_eq!(
+            strip_comment("   ; keyword = referenceName, DisplayName"),
+            ""
+        );
+        assert_eq!(strip_comment(";settingOption = BOOSTPSI, \"PSI\""), "");
+
+        // Help-text syntax always has a field name before the ';', so it is
+        // unaffected: the semicolon before '=' is still preserved.
+        assert_eq!(
+            strip_comment("bias_resistor;+Pull-up resistor = 4700"),
+            "bias_resistor;+Pull-up resistor = 4700"
+        );
+
+        // Trailing comments after a value are still stripped as before.
+        assert_eq!(
+            strip_comment("someField = 42 ; trailing note").trim(),
+            "someField = 42"
+        );
     }
 }
 
