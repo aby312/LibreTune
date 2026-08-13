@@ -25,8 +25,10 @@
 //! - **Restore on every path.** The original value is written back after each
 //!   step, on abort, and on error. The restore is attempted even when the run
 //!   is failing, and a failure to restore is escalated loudly.
-//! - **Abortable.** The operator can stop between steps, and abort triggers an
-//!   immediate restore.
+//! - **Abortable.** Abort takes effect within one tick (~50 ms), not at the
+//!   next step boundary: an abort during the hold cuts the enrichment short
+//!   and restores immediately, and an abort during the settle skips the
+//!   remaining wait.
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +92,25 @@ fn abort_flag() -> Arc<AtomicBool> {
 pub async fn abort_afr_delay_test() -> Result<(), String> {
     abort_flag().store(true, Ordering::SeqCst);
     Ok(())
+}
+
+/// Sleep for `total_ms`, waking every ~50 ms to check the abort flag, so an
+/// abort takes effect almost immediately instead of after the full hold or
+/// settle (up to 15 s combined — long enough that the Abort button appears
+/// dead, over an engine being held rich). Returns true if an abort was
+/// requested during (or before) the wait.
+async fn sleep_abortable(total_ms: u64) -> bool {
+    const TICK_MS: u64 = 50;
+    let mut remaining = total_ms;
+    while remaining > 0 {
+        if abort_flag().load(Ordering::SeqCst) {
+            return true;
+        }
+        let tick = remaining.min(TICK_MS);
+        tokio::time::sleep(Duration::from_millis(tick)).await;
+        remaining -= tick;
+    }
+    abort_flag().load(Ordering::SeqCst)
 }
 
 /// Run an automated series of enrichment steps.
@@ -204,13 +225,22 @@ pub async fn run_afr_delay_test(
             });
         }
 
-        tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+        // Abort-aware hold: an abort mid-hold falls straight through to the
+        // restore below, so the enrichment is cut short rather than held for
+        // the remainder of `hold_ms`.
+        let aborted_mid_hold = sleep_abortable(hold_ms).await;
 
         if let Err(e) = restore(&state, baseline).await {
             return Err(format!(
                 "Applied step {step} but could not restore {FUEL_CONSTANT} to {baseline} ({e}). \
                  The engine is running RICH. CYCLE THE KEY to reload the stored tune."
             ));
+        }
+
+        if aborted_mid_hold {
+            // Restored, but the step's hold was cut short — don't count it and
+            // don't settle; the summary below reports the abort.
+            break;
         }
 
         completed = step;
@@ -227,8 +257,8 @@ pub async fn run_afr_delay_test(
             },
         );
 
-        if step < repeats {
-            tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+        if step < repeats && sleep_abortable(settle_ms).await {
+            break;
         }
     }
 
@@ -293,6 +323,29 @@ mod tests {
     fn hold_and_settle_are_bounded() {
         assert_eq!(0u64.clamp(MIN_HOLD_MS, MAX_HOLD_MS), MIN_HOLD_MS);
         assert_eq!(u64::MAX.clamp(MIN_HOLD_MS, MAX_HOLD_MS), MAX_HOLD_MS);
+    }
+
+    /// Abort must interrupt a wait within a tick or two, not after the full
+    /// duration — this is the "Abort button appears dead for 15 s over a rich
+    /// engine" regression. Single test (not two) because the abort flag is a
+    /// process-wide static shared with any parallel test.
+    #[tokio::test]
+    async fn abort_interrupts_a_long_wait_quickly() {
+        // Phase 1: no abort — the full (short) wait elapses, returns false.
+        abort_flag().store(false, Ordering::SeqCst);
+        assert!(!sleep_abortable(120).await);
+
+        // Phase 2: abort pre-set — a 5 s wait must return true immediately.
+        abort_flag().store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        assert!(sleep_abortable(5_000).await);
+        assert!(
+            started.elapsed() < Duration::from_millis(1_000),
+            "abort took {:?} to interrupt the wait",
+            started.elapsed()
+        );
+
+        abort_flag().store(false, Ordering::SeqCst);
     }
 
     /// The enriched value must round to the constant's 0.1 resolution and be
