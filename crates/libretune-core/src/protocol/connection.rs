@@ -1752,8 +1752,13 @@ impl Connection {
             let response = self.send_packet(packet)?;
             check_write_response_status(&response)
         } else {
-            // Legacy protocol: send raw command
-            self.send_raw_command(&cmd)?;
+            // Legacy protocol: value writes (Speeduino 'M', MS 'w') define no
+            // response, exactly like legacy burn above. Waiting for one stalls
+            // every write for the full serial timeout (~2 s), and the timeout
+            // is then misreported as a write failure — single edits appear to
+            // fail (they actually landed), and write_page's retry loop treats
+            // the phantom failure as fatal and aborts bulk writes partway.
+            self.send_raw_command_no_response(&cmd)?;
             Ok(())
         };
 
