@@ -163,6 +163,13 @@ pub async fn create_project(
 
     let mut proj_guard = state.current_project.lock().await;
     *proj_guard = Some(project);
+    drop(proj_guard);
+
+    // This function inlines its own copy of the tune-apply ("same logic as
+    // load_tune"), so it must also run the deferred-scale resolution that
+    // load_tune runs — otherwise a project opened offline keeps the 1.0
+    // parse-time fallback and load axes render at raw scale.
+    crate::commands::load_tune::resolve_scales_from_tune(&state).await;
 
     Ok(response)
 }
@@ -638,6 +645,12 @@ pub async fn open_project(
         let cache = TuneCache::from_definition(&def_clone);
         *state.tune_cache.lock().await = Some(cache);
     }
+
+    // open_project inlines its own tune-apply ("same logic as load_tune"), so
+    // it must also run load_tune's deferred-scale resolution — without it a
+    // project opened offline keeps the 1.0 parse-time fallback and every
+    // expression-scaled axis (Speeduino load axes) renders at raw scale.
+    crate::commands::load_tune::resolve_scales_from_tune(&state).await;
 
     Ok(response)
 }
