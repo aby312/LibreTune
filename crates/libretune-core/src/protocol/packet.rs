@@ -12,6 +12,46 @@ use crc32fast::Hasher;
 
 use super::{ProtocolError, MAX_PACKET_SIZE};
 
+/// Byte order of the envelope's length and CRC fields.
+///
+/// msEnvelope_1.0 and rusEFI frame big-endian. Speeduino's firmware reads
+/// both fields little-endian ("TS comms is little-endian" — comms.cpp, tag
+/// 202501); sending it big-endian frames makes a length of 1 parse as 256 and
+/// deadlocks the handshake in mutual timeouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnvelopeOrder {
+    #[default]
+    BigEndian,
+    LittleEndian,
+}
+
+impl EnvelopeOrder {
+    pub fn read_u16(self, b: &[u8]) -> u16 {
+        match self {
+            EnvelopeOrder::BigEndian => BigEndian::read_u16(b),
+            EnvelopeOrder::LittleEndian => LittleEndian::read_u16(b),
+        }
+    }
+    pub fn read_u32(self, b: &[u8]) -> u32 {
+        match self {
+            EnvelopeOrder::BigEndian => BigEndian::read_u32(b),
+            EnvelopeOrder::LittleEndian => LittleEndian::read_u32(b),
+        }
+    }
+    pub fn write_u16(self, b: &mut [u8], v: u16) {
+        match self {
+            EnvelopeOrder::BigEndian => BigEndian::write_u16(b, v),
+            EnvelopeOrder::LittleEndian => LittleEndian::write_u16(b, v),
+        }
+    }
+    pub fn write_u32(self, b: &mut [u8], v: u32) {
+        match self {
+            EnvelopeOrder::BigEndian => BigEndian::write_u32(b, v),
+            EnvelopeOrder::LittleEndian => LittleEndian::write_u32(b, v),
+        }
+    }
+}
+
 /// A protocol packet
 #[derive(Debug, Clone)]
 pub struct Packet {
@@ -45,11 +85,21 @@ impl Packet {
     /// (length+data), each in both big- and little-endian. A one-time warning
     /// is logged when permissive matching succeeds with a non-strict scope.
     pub fn from_bytes_with_mode(data: &[u8], permissive: bool) -> Result<Self, ProtocolError> {
+        Self::from_bytes_ordered(data, EnvelopeOrder::BigEndian, permissive)
+    }
+
+    /// Decode with an explicit envelope byte order for the length and CRC
+    /// fields (Speeduino = little-endian, rusEFI/spec = big-endian).
+    pub fn from_bytes_ordered(
+        data: &[u8],
+        order: EnvelopeOrder,
+        permissive: bool,
+    ) -> Result<Self, ProtocolError> {
         if data.len() < 6 {
             return Err(ProtocolError::InvalidResponse);
         }
 
-        let length = BigEndian::read_u16(&data[0..2]) as usize;
+        let length = order.read_u16(&data[0..2]) as usize;
         if length > MAX_PACKET_SIZE {
             return Err(ProtocolError::BufferOverflow);
         }
@@ -59,25 +109,26 @@ impl Packet {
 
         let payload = data[2..2 + length].to_vec();
         let crc_bytes = &data[2 + length..2 + length + 4];
+        let received_crc = order.read_u32(crc_bytes);
         let received_crc_be = BigEndian::read_u32(crc_bytes);
 
-        // Strict spec: scope A (full payload) big-endian.
+        // Strict: scope A (full payload) in the caller's declared byte order.
         let crc_a = {
             let mut h = Hasher::new();
             h.update(&payload);
             h.finalize()
         };
-        if received_crc_be == crc_a {
+        if received_crc == crc_a {
             return Ok(Self {
                 payload,
-                crc: received_crc_be,
+                crc: received_crc,
             });
         }
 
         if !permissive {
             return Err(ProtocolError::CrcMismatch {
                 expected: crc_a,
-                actual: received_crc_be,
+                actual: received_crc,
             });
         }
 
@@ -175,24 +226,30 @@ impl Packet {
 
     /// Encode the packet to raw bytes
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_bytes_ordered(EnvelopeOrder::BigEndian)
+    }
+
+    /// Encode with an explicit envelope byte order for the length and CRC
+    /// fields (Speeduino = little-endian, rusEFI/spec = big-endian).
+    pub fn to_bytes_ordered(&self, order: EnvelopeOrder) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(2 + self.payload.len() + 4);
 
-        // Length (2 bytes, big-endian)
+        // Length (2 bytes)
         let mut len_bytes = [0u8; 2];
-        BigEndian::write_u16(&mut len_bytes, self.payload.len() as u16);
+        order.write_u16(&mut len_bytes, self.payload.len() as u16);
         bytes.extend_from_slice(&len_bytes);
 
         // Payload
         bytes.extend_from_slice(&self.payload);
 
-        // Calculate CRC of payload only (rusEFI format)
+        // CRC of payload only
         let mut hasher = Hasher::new();
         hasher.update(&self.payload);
         let crc = hasher.finalize();
 
-        // CRC (4 bytes, big-endian)
+        // CRC (4 bytes)
         let mut crc_bytes = [0u8; 4];
-        BigEndian::write_u32(&mut crc_bytes, crc);
+        order.write_u32(&mut crc_bytes, crc);
         bytes.extend_from_slice(&crc_bytes);
 
         bytes
@@ -287,6 +344,58 @@ mod tests {
         let decoded = Packet::from_bytes(&encoded).expect("Should decode successfully");
 
         assert_eq!(original.payload, decoded.payload);
+    }
+
+    /// Speeduino frames the envelope little-endian ("TS comms is
+    /// little-endian" — comms.cpp @ 202501): length bytes reversed, CRC bytes
+    /// reversed, same payload-only CRC coverage.
+    #[test]
+    fn little_endian_roundtrip_matches_speeduino_framing() {
+        let original = Packet::new(vec![0x51]); // enveloped 'Q'
+        let encoded = original.to_bytes_ordered(EnvelopeOrder::LittleEndian);
+
+        // Length 1 little-endian = [0x01, 0x00] (big-endian would be [0x00, 0x01]).
+        assert_eq!(&encoded[0..2], &[0x01, 0x00]);
+        assert_eq!(encoded[2], 0x51);
+        // CRC little-endian: least-significant byte first. Computed over the
+        // payload only, matching what the encoder puts on the wire. (Not
+        // compared against Packet::new's stored `crc` field — that helper
+        // hashes length+payload and never matches the wire; pre-existing.)
+        let wire_crc = {
+            let mut h = Hasher::new();
+            h.update(&original.payload);
+            h.finalize()
+        };
+        assert_eq!(&encoded[3..7], &wire_crc.to_le_bytes());
+
+        let decoded = Packet::from_bytes_ordered(&encoded, EnvelopeOrder::LittleEndian, false)
+            .expect("LE frame must decode with LE order");
+        assert_eq!(decoded.payload, original.payload);
+    }
+
+    /// A Speeduino return-code frame (e.g. SERIAL_RC_TIMEOUT 0x83 / CRC_ERR
+    /// 0x82) decodes under little-endian order.
+    #[test]
+    fn decodes_speeduino_return_code_frame() {
+        let rc = Packet::new(vec![0x82]);
+        let wire = rc.to_bytes_ordered(EnvelopeOrder::LittleEndian);
+        let decoded = Packet::from_bytes_ordered(&wire, EnvelopeOrder::LittleEndian, false)
+            .expect("rc frame must decode");
+        assert_eq!(decoded.payload, vec![0x82]);
+    }
+
+    /// The D1 deadlock in miniature: a big-endian frame read with the wrong
+    /// (little-endian) order turns length 1 into 256 and cannot decode — the
+    /// exact mutual-misparse that stalled the handshake against real
+    /// Speeduino firmware.
+    #[test]
+    fn cross_order_read_misparses_length() {
+        let packet = Packet::new(vec![0x51]);
+        let be_wire = packet.to_bytes_ordered(EnvelopeOrder::BigEndian);
+        // [0x00, 0x01] read little-endian = 256 > available bytes.
+        let err = Packet::from_bytes_ordered(&be_wire, EnvelopeOrder::LittleEndian, false)
+            .expect_err("cross-order read must fail, not succeed by accident");
+        assert!(matches!(err, ProtocolError::InvalidResponse));
     }
 
     #[test]

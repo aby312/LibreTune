@@ -25,7 +25,7 @@ pub use connection::{
     Connection, ConnectionConfig, ConnectionState, ConnectionType, RuntimeFetch, RuntimePacketMode,
 };
 pub use error::ProtocolError;
-pub use packet::{Packet, PacketBuilder};
+pub use packet::{EnvelopeOrder, Packet, PacketBuilder};
 pub use response_code::ResponseCode;
 pub use serial::{clear_buffers, configure_port, list_ports, open_port, PortInfo};
 pub use stream::CommunicationChannel;

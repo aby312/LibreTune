@@ -11,7 +11,8 @@ use super::stream::{CommunicationChannel, SerialChannel, TcpChannel};
 use super::{
     commands::{BurnParams, ReadMemoryParams, WriteMemoryParams},
     serial::{clear_buffers, configure_port, list_ports, open_port, PortInfo},
-    Command, CommandBuilder, Packet, ProtocolError, DEFAULT_BAUD_RATE, DEFAULT_TIMEOUT_MS,
+    Command, CommandBuilder, EnvelopeOrder, Packet, ProtocolError, DEFAULT_BAUD_RATE,
+    DEFAULT_TIMEOUT_MS,
 };
 use crate::ini::{AdaptiveTiming, AdaptiveTimingConfig, EcuType, Endianness, ProtocolSettings};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -344,6 +345,11 @@ pub struct Connection {
     signature: Option<String>,
     /// Use modern protocol (detected from INI or ECU response)
     use_modern_protocol: bool,
+    /// Byte order of the CRC envelope's length/CRC fields. Speeduino is
+    /// little-endian, rusEFI/msEnvelope big-endian; set from ProtocolSettings
+    /// and corrected by the handshake's flip-retry if the INI's ECU-type
+    /// detection guessed wrong.
+    envelope_order: EnvelopeOrder,
     /// Protocol settings from INI file (optional, for INI-driven communication)
     protocol_settings: Option<ProtocolSettings>,
     /// Command builder for formatting commands
@@ -378,6 +384,7 @@ impl Connection {
             config,
             signature: None,
             use_modern_protocol: true,
+            envelope_order: EnvelopeOrder::BigEndian,
             protocol_settings: None,
             // When no INI is loaded, default to big-endian command parameters (safe default;
             // overridden to match the INI endianness when with_protocol/set_protocol is called).
@@ -407,12 +414,18 @@ impl Connection {
         // parameters (the INI declares `endianness = little`), while Speeduino
         // and MS2/MS3 use big-endian command parameters.
         let cmd_le = endianness == Endianness::Little;
+        let envelope_order = if protocol.envelope_little_endian {
+            EnvelopeOrder::LittleEndian
+        } else {
+            EnvelopeOrder::BigEndian
+        };
         Self {
             channel: None,
             state: ConnectionState::Disconnected,
             config,
             signature: None,
             use_modern_protocol: use_modern,
+            envelope_order,
             protocol_settings: Some(protocol),
             command_builder: CommandBuilder::new(cmd_le),
             endianness,
@@ -433,6 +446,11 @@ impl Connection {
         // Use LE command parameters when INI specifies little-endian (rusEFI/epicEFI/FOME).
         self.command_builder = CommandBuilder::new(endianness == Endianness::Little);
         self.endianness = endianness;
+        self.envelope_order = if protocol.envelope_little_endian {
+            EnvelopeOrder::LittleEndian
+        } else {
+            EnvelopeOrder::BigEndian
+        };
         self.protocol_settings = Some(protocol);
     }
 
@@ -714,25 +732,55 @@ impl Connection {
                 let _ = channel.clear_input_buffer();
             }
 
-            let packet = Packet::new(cmd_bytes.clone());
-            if let Ok(response_packet) = self.send_packet(packet) {
-                tracing::debug!("handshake: CRC protocol succeeded");
-                self.use_modern_protocol = true;
+            // Try the dialect's declared envelope byte order first, then the
+            // flipped order. The ECU-type detection sets the right order for
+            // known dialects (Speeduino little-endian, rusEFI big-endian), but
+            // a wrong guess used to cost the entire CRC path: both sides
+            // misparse each other's length field as 256 and time out (D1).
+            let first_order = self.envelope_order;
+            let orders = [
+                first_order,
+                match first_order {
+                    EnvelopeOrder::BigEndian => EnvelopeOrder::LittleEndian,
+                    EnvelopeOrder::LittleEndian => EnvelopeOrder::BigEndian,
+                },
+            ];
+            for (attempt, order) in orders.into_iter().enumerate() {
+                self.envelope_order = order;
+                if attempt > 0 {
+                    tracing::debug!(
+                        "handshake: retrying CRC with flipped envelope order {:?}",
+                        order
+                    );
+                    if let Some(channel) = self.channel.as_mut() {
+                        let _ = channel.clear_input_buffer();
+                    }
+                }
+                let packet = Packet::new(cmd_bytes.clone());
+                if let Ok(response_packet) = self.send_packet(packet) {
+                    tracing::debug!(
+                        "handshake: CRC protocol succeeded (envelope order {:?})",
+                        order
+                    );
+                    self.use_modern_protocol = true;
 
-                // Handle status byte: response may start with 0x00 (success)
-                let payload = &response_packet.payload;
-                let signature_bytes = if !payload.is_empty() && payload[0] == 0 {
-                    &payload[1..]
-                } else {
-                    payload.as_slice()
-                };
+                    // Handle status byte: response may start with 0x00 (success)
+                    let payload = &response_packet.payload;
+                    let signature_bytes = if !payload.is_empty() && payload[0] == 0 {
+                        &payload[1..]
+                    } else {
+                        payload.as_slice()
+                    };
 
-                let signature = String::from_utf8_lossy(signature_bytes).trim().to_string();
-                tracing::debug!("handshake: CRC success, signature = {:?}", signature);
-                return Ok(signature);
-            } else {
-                tracing::debug!("handshake: CRC protocol failed, trying legacy");
+                    let signature = String::from_utf8_lossy(signature_bytes).trim().to_string();
+                    tracing::debug!("handshake: CRC success, signature = {:?}", signature);
+                    return Ok(signature);
+                }
             }
+            // Neither order worked — restore the declared order for any later
+            // attempts and fall through to legacy.
+            self.envelope_order = first_order;
+            tracing::debug!("handshake: CRC protocol failed in both byte orders, trying legacy");
         }
 
         // Try legacy protocol (raw ASCII command)
@@ -1007,7 +1055,7 @@ impl Connection {
     /// Send CRC packet WITHOUT waiting for response (for burn commands)
     fn send_packet_no_response(&mut self, packet: Packet) -> Result<(), ProtocolError> {
         let channel = self.channel.as_mut().ok_or(ProtocolError::NotConnected)?;
-        let bytes = packet.to_bytes();
+        let bytes = packet.to_bytes_ordered(self.envelope_order);
 
         tracing::debug!("send_packet_no_response: sending {} bytes", bytes.len());
 
@@ -1108,7 +1156,7 @@ impl Connection {
         let send_start = Instant::now();
 
         // Send packet and wait for transmission
-        let bytes = packet.to_bytes();
+        let bytes = packet.to_bytes_ordered(self.envelope_order);
         // Use write_and_wait which avoids the blocking tcdrain issue
         self.tx_bytes = self.tx_bytes.saturating_add(bytes.len() as u64);
         self.tx_packets = self.tx_packets.saturating_add(1);
@@ -1191,7 +1239,10 @@ impl Connection {
         }
 
         // Parse length
-        let length = u16::from_be_bytes(header) as usize;
+        // Length field byte order follows the ECU dialect: Speeduino frames
+        // little-endian, rusEFI/msEnvelope big-endian. Misreading it turns a
+        // 1-byte response into a 256-byte wait (D1).
+        let length = self.envelope_order.read_u16(&header) as usize;
         if length > super::MAX_PACKET_SIZE {
             tracing::warn!(
                 "send_packet: response length {} exceeds MAX_PACKET_SIZE",
@@ -1237,7 +1288,11 @@ impl Connection {
         // If CRC parsing fails, the full packet was already consumed from the TCP
         // stream (exact bytes read = 2 + length + 4), so the stream IS aligned.
         // No drain needed on CRC mismatch — just return the error.
-        Packet::from_bytes_with_mode(&full_packet, self.config.permissive_crc)
+        Packet::from_bytes_ordered(
+            &full_packet,
+            self.envelope_order,
+            self.config.permissive_crc,
+        )
     }
 
     /// Decide which runtime fetch command to use (Burst vs OCH)

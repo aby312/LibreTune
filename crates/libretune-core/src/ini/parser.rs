@@ -419,6 +419,12 @@ fn parse_ini_internal(content: &str, ctx: &mut IncludeContext) -> Result<EcuDefi
             .and_then(|n| n.to_str()),
     );
 
+    // Speeduino frames its CRC envelope little-endian (comms.cpp: "TS comms
+    // is little-endian"), unlike the big-endian msEnvelope_1.0/rusEFI
+    // convention — the packet layer must match or the handshake deadlocks on
+    // misparsed lengths (see ProtocolSettings::envelope_little_endian).
+    definition.protocol.envelope_little_endian = matches!(definition.ecu_type, EcuType::Speeduino);
+
     Ok(definition)
 }
 

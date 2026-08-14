@@ -951,6 +951,18 @@ pub struct ProtocolSettings {
     /// Message envelope format (e.g., "msEnvelope_1.0" for CRC framing)
     pub message_envelope_format: Option<String>,
 
+    /// Whether the ECU's CRC envelope uses little-endian length/CRC fields.
+    ///
+    /// The msEnvelope_1.0 spec (and rusEFI) frame big-endian, but Speeduino's
+    /// firmware reads both the 2-byte length and the 4-byte CRC32
+    /// little-endian ("TS comms is little-endian" — comms.cpp, tag 202501).
+    /// Sending big-endian frames to it makes the length 0x0001 parse as 256:
+    /// the firmware waits 400 ms for a payload that never comes, replies with
+    /// a little-endian error frame the big-endian reader also misparses, and
+    /// both sides time out — the entire CRC handshake failure against real
+    /// Speeduino hardware. Set from the detected ECU type at parse time.
+    pub envelope_little_endian: bool,
+
     /// Query command to get signature (usually "S" or "Q")
     pub query_command: String,
 
@@ -1064,6 +1076,7 @@ impl Default for ProtocolSettings {
     fn default() -> Self {
         Self {
             message_envelope_format: None,
+            envelope_little_endian: false,
             query_command: "Q".to_string(),
             delay_after_port_open: 0,
             page_identifiers: Vec::new(),
