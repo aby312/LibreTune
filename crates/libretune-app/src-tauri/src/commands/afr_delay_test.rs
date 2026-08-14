@@ -341,7 +341,12 @@ pub async fn run_afr_delay_test(
     }
 
     /// Baseline window sampled immediately before each enrichment write.
-    const PRE_ROLL_MS: u64 = 600;
+    /// Sized for real-world sampling: live single-shot reads contend with the
+    /// realtime stream for the serial link and land at ~5-9 Hz on hardware
+    /// (not the ~20 Hz seen on the bench), so 600 ms could gather fewer than
+    /// MIN_BASELINE_SAMPLES and reject every step. 1.5 s gives 7+ samples at
+    /// the worst observed rate.
+    const PRE_ROLL_MS: u64 = 1_500;
 
     let mut completed = 0u32;
     for step in 1..=repeats {
