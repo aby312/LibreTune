@@ -157,7 +157,7 @@ use commands::table_ops::{
     add_offset, fill_region, interpolate_cells, interpolate_linear, rebin_table, resize_table_size,
     scale_cells, set_cells_equal, smooth_table,
 };
-use commands::table_update::update_table_data;
+use commands::table_update::{update_table_cells, update_table_data};
 use commands::ts_import::{import_tunerstudio_project, preview_tunerstudio_import};
 use commands::tune_compare::{compare_tune_files, merge_from_tune};
 use commands::tune_health::{
@@ -257,6 +257,7 @@ pub fn run() {
             get_status_bar_defaults,
             get_frontpage,
             update_table_data,
+            update_table_cells,
             update_curve_data,
             get_menu_tree,
             get_searchable_index,
