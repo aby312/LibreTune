@@ -75,6 +75,34 @@ pub struct Constant {
     /// Present when the INI sizes this array with `{const}` refs (resizable tables).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_size: Option<DynamicSizeRefs>,
+
+    /// Raw INI text of the scale field when it is an expression rather than a
+    /// literal, e.g. Speeduino's `{fuelLoadRes}` (which resolves to 2.0 or 0.5
+    /// depending on the `algorithm` constant). Such a field cannot be resolved
+    /// at parse time because it depends on tune values, so the expression is
+    /// kept here and applied by [`resolve_dynamic_scale`] once those are known.
+    /// Without it the field silently fell back to 1.0 and every affected axis
+    /// displayed raw storage units (a Speeduino load axis read 8-50 instead of
+    /// 16-100 kPa).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_expr: Option<String>,
+
+    /// Same as [`Constant::scale_expr`], for the translate field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translate_expr: Option<String>,
+}
+
+/// Extract a deferred expression from an INI numeric field.
+///
+/// Returns `Some(expr)` when the field is a `{...}` expression that cannot be
+/// parsed as a literal, and `None` when it is a plain number (or empty).
+pub fn deferred_expr(field: &str) -> Option<String> {
+    let t = field.trim();
+    if t.parse::<f64>().is_ok() {
+        return None;
+    }
+    let inner = t.strip_prefix('{')?.strip_suffix('}')?.trim();
+    (!inner.is_empty()).then(|| inner.to_string())
 }
 
 impl Constant {
@@ -102,6 +130,8 @@ impl Constant {
             bit_options: Vec::new(),
             is_pc_variable: false,
             dynamic_size: None,
+            scale_expr: None,
+            translate_expr: None,
         }
     }
 
@@ -158,6 +188,8 @@ impl Default for Constant {
             bit_options: Vec::new(),
             is_pc_variable: false,
             dynamic_size: None,
+            scale_expr: None,
+            translate_expr: None,
         }
     }
 }
@@ -247,12 +279,17 @@ pub fn parse_constant_line(
         constant.units = parts[units_idx].trim_matches('"').to_string();
     }
 
-    // Parse scale, translate, min, max, digits
+    // Parse scale, translate, min, max, digits.
+    // scale/translate may be `{expr}` referencing other constants (Speeduino's
+    // `{fuelLoadRes}`); those are kept for deferred resolution instead of
+    // silently collapsing to the literal fallback.
     let scale_idx = units_idx + 1;
     if parts.len() > scale_idx {
+        constant.scale_expr = deferred_expr(parts[scale_idx]);
         constant.scale = parts[scale_idx].parse().unwrap_or(1.0);
     }
     if parts.len() > scale_idx + 1 {
+        constant.translate_expr = deferred_expr(parts[scale_idx + 1]);
         constant.translate = parts[scale_idx + 1].parse().unwrap_or(0.0);
     }
     if parts.len() > scale_idx + 2 {

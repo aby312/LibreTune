@@ -376,6 +376,82 @@ impl EcuDefinition {
         format!("{:016x}", hasher.finish())
     }
 
+    /// Resolve `scale`/`translate` fields that the INI expresses as
+    /// `{expression}` rather than a literal.
+    ///
+    /// These cannot be resolved while parsing because they depend on tune
+    /// values: Speeduino's load axes use `{fuelLoadRes}`, which is
+    /// `((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500` — the correct
+    /// factor is only known once `algorithm` has been read from the ECU or
+    /// tune file. Until then the field falls back to its literal default of
+    /// 1.0, which renders a speed-density load axis in raw storage units (8-50
+    /// instead of 16-100 kPa) and mis-bins anything that looks a cell up by
+    /// load.
+    ///
+    /// `values` maps constant name to current value (display units). Call
+    /// after a tune is loaded, and again if a constant that feeds one of these
+    /// expressions changes. Returns the number of constants updated.
+    pub fn resolve_dynamic_scales(
+        &mut self,
+        values: &std::collections::HashMap<String, f64>,
+    ) -> usize {
+        // A scale expression usually names a computed helper rather than a
+        // constant (`{fuelLoadRes}`), and those helpers live among the output
+        // channels, so evaluate them into the context first. Two passes let a
+        // helper depend on another helper without ordering assumptions.
+        let mut context = values.clone();
+        for _ in 0..2 {
+            for (name, channel) in &self.output_channels {
+                let Some(expr) = channel.expression.as_ref() else {
+                    continue;
+                };
+                if values.contains_key(name) {
+                    continue; // a real measured value always wins
+                }
+                let mut parser = expression::Parser::new(expr);
+                if let Ok(ast) = parser.parse() {
+                    if let Ok(v) = expression::evaluate(&ast, &context, None) {
+                        let v = v.as_f64();
+                        if v.is_finite() {
+                            context.insert(name.clone(), v);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut updated = 0;
+        for constant in self.constants.values_mut() {
+            for (source, target) in [
+                (constant.scale_expr.clone(), true),
+                (constant.translate_expr.clone(), false),
+            ] {
+                let Some(src) = source else { continue };
+                let mut parser = expression::Parser::new(&src);
+                let Ok(ast) = parser.parse() else { continue };
+                let Ok(value) = expression::evaluate(&ast, &context, None) else {
+                    continue;
+                };
+                let v = value.as_f64();
+                if !v.is_finite() {
+                    continue;
+                }
+                if target {
+                    // A zero scale would render every value as 0; treat it as
+                    // an unresolved expression rather than trusting it.
+                    if v != 0.0 && constant.scale != v {
+                        constant.scale = v;
+                        updated += 1;
+                    }
+                } else if constant.translate != v {
+                    constant.translate = v;
+                    updated += 1;
+                }
+            }
+        }
+        updated
+    }
+
     /// Generate a constant manifest for saving with tune files
     pub fn generate_constant_manifest(&self) -> Vec<crate::tune::ConstantManifestEntry> {
         let mut manifest = Vec::new();
@@ -511,6 +587,58 @@ impl Default for EcuDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real Speeduino case: a load axis whose scale is `{fuelLoadRes}`,
+    /// itself `((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500`. Before
+    /// deferred resolution the scale silently stayed 1.0 and the axis read in
+    /// raw storage units (8-50 instead of 16-100 kPa).
+    #[test]
+    fn resolves_expression_scale_from_tune_values() {
+        let mut def = EcuDefinition::default();
+
+        let mut bins = Constant::new("fuelLoadBins", 1, 272, DataType::U08);
+        bins.shape = Shape::Array1D(16);
+        bins.scale_expr = Some("fuelLoadRes".to_string());
+        bins.scale = 1.0; // parse-time fallback
+        def.constants.insert(bins.name.clone(), bins);
+
+        def.output_channels.insert(
+            "fuelLoadRes".to_string(),
+            OutputChannel {
+                name: "fuelLoadRes".to_string(),
+                expression: Some(
+                    "((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500".to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        // algorithm 0 = MAP / speed density -> 2.0
+        let mut values = std::collections::HashMap::new();
+        values.insert("algorithm".to_string(), 0.0);
+        assert_eq!(def.resolve_dynamic_scales(&values), 1);
+        assert_eq!(def.constants["fuelLoadBins"].scale, 2.0);
+
+        // algorithm 1 = TPS / alpha-N -> 0.5 (the else branch)
+        values.insert("algorithm".to_string(), 1.0);
+        assert_eq!(def.resolve_dynamic_scales(&values), 1);
+        assert_eq!(def.constants["fuelLoadBins"].scale, 0.5);
+
+        // Idempotent: re-resolving with unchanged inputs updates nothing.
+        assert_eq!(def.resolve_dynamic_scales(&values), 0);
+    }
+
+    /// A literal scale must never be treated as a deferred expression.
+    #[test]
+    fn literal_scale_is_not_deferred() {
+        assert_eq!(constants::deferred_expr("1.0"), None);
+        assert_eq!(constants::deferred_expr(" 0.5 "), None);
+        assert_eq!(
+            constants::deferred_expr("{fuelLoadRes}").as_deref(),
+            Some("fuelLoadRes")
+        );
+        assert_eq!(constants::deferred_expr("{}"), None);
+    }
 
     #[test]
     fn test_default_definition() {

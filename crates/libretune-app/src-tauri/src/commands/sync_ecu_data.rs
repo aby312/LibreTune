@@ -294,6 +294,13 @@ pub async fn sync_ecu_data(
         }
     }
 
+    // Page data from the ECU is the other source of the constants that
+    // `{expression}` scales depend on (e.g. `algorithm` feeding
+    // `{fuelLoadRes}`), so resolve them here too — connecting to an ECU
+    // without loading a tune file must not leave load axes on the 1.0
+    // parse-time fallback.
+    crate::commands::load_tune::resolve_scales_from_tune(&state).await;
+
     if pages_failed == 0 {
         let _ = app.emit("tune:loaded", "ecu-sync");
     }

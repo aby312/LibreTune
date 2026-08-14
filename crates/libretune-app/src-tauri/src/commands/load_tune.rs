@@ -8,6 +8,60 @@ use libretune_core::tune::{PageState, TuneCache, TuneFile};
 use std::path::PathBuf;
 use tauri::Emitter;
 
+/// Resolve INI scale/translate fields that are `{expression}` rather than a
+/// literal, now that tune values are known.
+///
+/// Speeduino's load axes scale by `{fuelLoadRes}`, which depends on the
+/// `algorithm` constant — unknowable while parsing the INI, so the field falls
+/// back to 1.0 and every load axis renders in raw storage units (8-50 instead
+/// of 16-100 kPa), which also mis-bins anything that looks a cell up by load.
+/// Run after the cache has been populated from the tune.
+pub(crate) async fn resolve_scales_from_tune(state: &AppState) {
+    // Read values under an immutable borrow, then re-lock mutably to apply —
+    // the definition mutex cannot be held both ways at once.
+    let values = {
+        let def_guard = state.definition.lock().await;
+        let Some(def) = def_guard.as_ref() else {
+            return;
+        };
+        if !def
+            .constants
+            .values()
+            .any(|c| c.scale_expr.is_some() || c.translate_expr.is_some())
+        {
+            return; // nothing deferred in this INI
+        }
+        let endianness = def.endianness;
+        let cache_guard = state.tune_cache.lock().await;
+        let tune_guard = state.current_tune.lock().await;
+        def.constants
+            .iter()
+            .filter(|(_, c)| c.shape == libretune_core::ini::Shape::Scalar)
+            .map(|(name, c)| {
+                let v = crate::commands::constant_values::read_constant_from_cache_or_tune(
+                    name,
+                    c,
+                    endianness,
+                    tune_guard.as_ref(),
+                    cache_guard.as_ref(),
+                );
+                (name.clone(), v)
+            })
+            .collect::<std::collections::HashMap<String, f64>>()
+    };
+
+    let mut def_guard = state.definition.lock().await;
+    if let Some(def) = def_guard.as_mut() {
+        let n = def.resolve_dynamic_scales(&values);
+        if n > 0 {
+            eprintln!(
+                "[INFO] Resolved {} expression-valued INI scale/translate field(s)",
+                n
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn load_tune(
     state: tauri::State<'_, AppState>,
@@ -595,6 +649,11 @@ pub async fn load_tune(
     *state.current_tune.lock().await = Some(tune.clone());
     *state.current_tune_path.lock().await = Some(PathBuf::from(path));
     *state.tune_modified.lock().await = false;
+
+    // Tune values are now in place, so `{expression}` scales can be resolved.
+    // Must run before any table is read: a load axis read beforehand would be
+    // scaled by the 1.0 parse-time fallback.
+    resolve_scales_from_tune(&state).await;
 
     // If a project is open, save the tune to the project's CurrentTune.msq
     // This ensures it will be auto-loaded next time the project is opened
