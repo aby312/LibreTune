@@ -1698,8 +1698,49 @@ impl Connection {
         Ok(())
     }
 
-    /// Write memory to ECU using INI-defined command format
+    /// Write memory to ECU using INI-defined command format.
+    ///
+    /// Payloads larger than the INI's `blockingFactor` are split into
+    /// sequential writes here rather than trusting callers to pre-chunk. The
+    /// ECU's serial RX buffer is exactly what `blockingFactor` declares (257
+    /// bytes minus protocol overhead on a Mega2560); a longer frame gets its
+    /// tail silently dropped by the ECU, which then consumes the next bytes on
+    /// the wire as if they were table data — observed on a running engine as a
+    /// partially-applied, corrupted VE table (drove visibly jerkily) when a
+    /// 263-byte full-table write went out unchunked. Six command paths call
+    /// this directly with unbounded payloads, so the guard belongs here, not
+    /// in each caller.
     pub fn write_memory(&mut self, params: WriteMemoryParams) -> Result<(), ProtocolError> {
+        let max_chunk = self
+            .protocol_settings
+            .as_ref()
+            .map(|p| p.blocking_factor)
+            .unwrap_or(256)
+            .max(1) as usize;
+        // Frame overhead (command byte, identifier, offset, count) also
+        // occupies the ECU buffer; keep the whole frame under the limit.
+        let max_data = max_chunk.saturating_sub(8).max(1);
+        if params.data.len() > max_data {
+            let mut offset = params.offset as usize;
+            let mut remaining = params.data.as_slice();
+            while !remaining.is_empty() {
+                let take = remaining.len().min(max_data);
+                let (head, tail) = remaining.split_at(take);
+                self.write_memory(WriteMemoryParams {
+                    can_id: params.can_id,
+                    page: params.page,
+                    offset: offset as u16,
+                    data: head.to_vec(),
+                })?;
+                offset += take;
+                remaining = tail;
+                if !remaining.is_empty() {
+                    std::thread::sleep(Duration::from_millis(self.get_effective_min_wait().max(5)));
+                }
+            }
+            return Ok(());
+        }
+
         // Auto-burn safety policy (spec §6.2): if the previous write targeted a different
         // page, burn it to flash before writing to the new page. Prevents partial-flash
         // corruption on power loss.
