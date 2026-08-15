@@ -1786,19 +1786,36 @@ impl Connection {
         }
     }
 
-    /// Write a full page to ECU, respecting blocking factor (same chunking as `read_page`).
-    pub fn write_page(&mut self, page: u8, data: &[u8]) -> Result<(), ProtocolError> {
+    /// The largest payload one write frame may carry.
+    ///
+    /// `blockingFactor` is the ECU's serial buffer less the envelope — Speeduino
+    /// spells this out in its own INI ("257-6=251"). The command header (byte,
+    /// identifier, offset, count) is carried *inside* that payload, so it comes
+    /// off the top as well.
+    ///
+    /// Both `write_memory` and `write_page` chunk, so they must agree: when
+    /// `write_page` split at the full blocking factor it handed `write_memory`
+    /// chunks 8 bytes too large, which then re-split every one of them into a
+    /// full frame plus an 8-byte runt — an extra round-trip and an extra pacing
+    /// delay per chunk on every bulk page write.
+    fn effective_write_chunk(&self) -> usize {
         let blocking_factor = self
             .protocol_settings
             .as_ref()
             .map(|p| p.blocking_factor)
             .unwrap_or(256)
-            .max(1);
+            .max(1) as usize;
+        blocking_factor.saturating_sub(8).max(1)
+    }
+
+    /// Write a full page to ECU, respecting blocking factor (same chunking as `read_page`).
+    pub fn write_page(&mut self, page: u8, data: &[u8]) -> Result<(), ProtocolError> {
+        let chunk_size = self.effective_write_chunk();
         let inter_chunk_ms = self.get_effective_min_wait().max(5);
 
         let mut offset = 0usize;
         while offset < data.len() {
-            let end = (offset + blocking_factor as usize).min(data.len());
+            let end = (offset + chunk_size).min(data.len());
             let chunk = &data[offset..end];
             let params = WriteMemoryParams {
                 page,
@@ -1862,15 +1879,7 @@ impl Connection {
     /// this directly with unbounded payloads, so the guard belongs here, not
     /// in each caller.
     pub fn write_memory(&mut self, params: WriteMemoryParams) -> Result<(), ProtocolError> {
-        let max_chunk = self
-            .protocol_settings
-            .as_ref()
-            .map(|p| p.blocking_factor)
-            .unwrap_or(256)
-            .max(1) as usize;
-        // Frame overhead (command byte, identifier, offset, count) also
-        // occupies the ECU buffer; keep the whole frame under the limit.
-        let max_data = max_chunk.saturating_sub(8).max(1);
+        let max_data = self.effective_write_chunk();
         if params.data.len() > max_data {
             let mut offset = params.offset as usize;
             let mut remaining = params.data.as_slice();
@@ -2758,6 +2767,34 @@ mod tests {
         assert_eq!(parse_command_string("Q"), vec![b'Q']);
         assert_eq!(parse_command_string("S"), vec![b'S']);
         assert_eq!(parse_command_string("Hello"), b"Hello".to_vec());
+    }
+
+    /// `write_page` and `write_memory` both chunk, so they must use the same
+    /// budget. Speeduino declares `blockingFactor = 251` and pages up to 384
+    /// bytes: splitting at the full 251 handed `write_memory` a chunk 8 bytes
+    /// over its own limit, which re-split it into 243 + an 8-byte runt frame.
+    #[test]
+    fn page_and_memory_writes_chunk_to_the_same_size() {
+        let mut conn = Connection::new(ConnectionConfig::default());
+        let mut proto = ProtocolSettings::default();
+        proto.blocking_factor = 251;
+        conn.set_protocol(proto, Endianness::Big);
+
+        let chunk = conn.effective_write_chunk();
+        assert_eq!(chunk, 243, "251 less the 8-byte command header");
+
+        // A 288-byte page must go out in exactly two frames, with no runt.
+        let frames: Vec<usize> = (0..288)
+            .step_by(chunk)
+            .map(|o| chunk.min(288 - o))
+            .collect();
+        assert_eq!(frames, vec![243, 45]);
+        for f in &frames {
+            assert!(
+                *f <= chunk,
+                "frame of {f} exceeds what write_memory accepts"
+            );
+        }
     }
 
     #[test]
