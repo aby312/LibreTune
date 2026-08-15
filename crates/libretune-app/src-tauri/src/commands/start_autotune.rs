@@ -39,17 +39,28 @@ pub async fn start_autotune(
         "No ECU definition loaded".to_string()
     })?;
     let definition_signature = def.signature.clone();
-    // Speeduino's AFR output channel is a byte scaled by 0.1, and it parks at
-    // 19.7 when the wideband is out of range. Other ECU families scale their
-    // AFR/lambda channels differently and 19.7 may be an ordinary reading, so
-    // claim a rail only where it is actually known.
-    let afr_rail = if matches!(def.ecu_type, libretune_core::ini::EcuType::Speeduino) {
-        19.7
-    } else {
-        f64::NAN
-    };
     let cache_guard = state.tune_cache.lock().await;
     let cache = cache_guard.as_ref();
+
+    // The fuel's stoichiometric ratio, used to turn a lambda channel into AFR.
+    // It is a property of the fuel - petrol 14.7, E85 about 9.8 - and the INI
+    // declares it (`stoich = scalar, U08, 50, ":1", 0.1`, described there as
+    // "The stoichiometric ratio of the fuel being used"), so it comes from the
+    // tune. 14.7 remains the fallback only when the ECU does not declare one.
+    let stoich_ratio = def
+        .constants
+        .get("stoich")
+        .map(|c| {
+            crate::commands::constant_values::read_constant_from_cache_or_tune(
+                "stoich",
+                c,
+                def.endianness,
+                None,
+                cache,
+            )
+        })
+        .filter(|v| *v > 1.0)
+        .unwrap_or(14.7);
 
     let mut resolved_load_source = load_source.unwrap_or(AutoTuneLoadSource::Map);
 
@@ -226,7 +237,7 @@ pub async fn start_autotune(
         secondary_y_bins,
         last_tps: None,
         last_timestamp_ms: None,
-        afr_rail,
+        stoich_ratio,
         reference_tables: reference_tables.clone(),
         strict_lambda_match: strict,
     };

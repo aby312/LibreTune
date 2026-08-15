@@ -169,7 +169,9 @@ pub struct AutoTuneConfig {
     /// This channel's out-of-range AFR value, or NaN when unknown. Only a
     /// known rail can be treated as a status value; for every other ECU the
     /// validity check falls back to the value-agnostic frozen-channel rule.
-    pub afr_rail: f64,
+    /// The fuel's stoichiometric ratio, from the INI's `stoich` constant.
+    /// Converts a lambda channel to AFR; petrol 14.7, E85 ~9.8.
+    pub stoich_ratio: f64,
     /// Per-cell Target AFR / lambda delay reference tables for the session.
     /// Empty by default → AutoTune falls back to settings.target_afr and the
     /// RPM-based delay curve. See bug #14.

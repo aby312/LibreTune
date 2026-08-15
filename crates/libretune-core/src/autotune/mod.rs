@@ -197,6 +197,11 @@ pub struct VEDataPoint {
     pub tps: f64,                          // Current TPS value (%)
     pub tps_rate: f64,                     // TPS change rate (%/sec)
     pub accel_enrich_active: Option<bool>, // ECU accel enrichment flag (if available)
+    /// ECU deceleration fuel-cut flag (Speeduino publishes `DFCOOn`), or `None`
+    /// when this ECU does not report one. Recorded per point because what
+    /// matters is whether fuel was being injected when *this* exhaust charge
+    /// was made, not what the engine is doing now.
+    pub fuel_cut: Option<bool>,
     // Lambda delay correlation
     pub timestamp_ms: u64, // Timestamp for delay correlation
 }
@@ -214,6 +219,7 @@ impl Default for VEDataPoint {
             tps: 0.0,
             tps_rate: 0.0,
             accel_enrich_active: None,
+            fuel_cut: None,
             timestamp_ms: 0,
         }
     }
@@ -539,6 +545,36 @@ impl AutoTuneState {
                 point.clone()
             }
         };
+
+        // On the overrun the ECU cuts injection entirely, so the exhaust is
+        // just air and the wideband reads its lean limit. Nothing about that
+        // measures fuelling, so it cannot teach VE.
+        //
+        // The test belongs on the *historical* point, not the current one: the
+        // reading arriving now was produced delay_ms ago. In one 59-minute
+        // drive 13.1% of running samples sat at the sensor's ceiling, and 91%
+        // of those had DFCO set at the time; the remainder were the tail of a
+        // cut still travelling down the exhaust. Testing "is fuel cut now"
+        // would both miss that tail and throw away the samples where the cut
+        // has just started but the sensor is still reporting real fuelled gas.
+        //
+        // `None` means the ECU does not publish the flag, and then nothing is
+        // rejected — an unknown must not silently discard a drive's data.
+        if historical_point.fuel_cut == Some(true) {
+            static FUEL_CUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = FUEL_CUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 5 || n.is_multiple_of(500) {
+                tracing::debug!(
+                    afr = point.afr,
+                    rpm = historical_point.rpm,
+                    load = historical_point.load,
+                    delay_ms,
+                    dropped_so_far = n + 1,
+                    "AutoTune: sample dropped (fuel cut when this charge was made)"
+                );
+            }
+            return;
+        }
 
         // Attribute the (delayed) AFR reading to the cell the engine was
         // actually in when that exhaust charge was produced.
@@ -1056,6 +1092,76 @@ mod tests {
         let settings = AutoTuneSettings::default();
         assert_eq!(settings.lambda_delay_ms, 0.0);
         assert_eq!(state.required_buffer_ms(&settings), 500);
+    }
+
+    /// On the overrun the ECU cuts injection, so the exhaust is air and the
+    /// wideband reads its lean limit — nothing there measures fuelling.
+    ///
+    /// The test must apply to the conditions when the charge was *made*, not
+    /// when the reading arrives. In one drive 13.1% of running samples sat at
+    /// the sensor ceiling and 91% of those had DFCO set at the time; the rest
+    /// were the tail of a cut still travelling down the exhaust. Testing "is
+    /// fuel cut now" would miss that tail, and would also discard samples where
+    /// a cut has just begun but the sensor still reports fuelled gas.
+    #[test]
+    fn fuel_cut_is_judged_when_the_charge_was_made_not_when_it_is_read() {
+        let x = vec![1000.0, 2000.0];
+        let y = vec![50.0, 100.0];
+        let mut settings = AutoTuneSettings::default();
+        settings.lambda_delay_ms = 300.0;
+        let mut filters = AutoTuneFilters::default();
+        // Keep this test about the fuel cut alone: the default min_clt is 160,
+        // which would otherwise reject every sample before the cut is consulted.
+        filters.min_clt = 60.0;
+        let authority = AutoTuneAuthorityLimits::default();
+
+        let point = |ts: u64, cut: Option<bool>| VEDataPoint {
+            rpm: 1500.0,
+            load: 75.0,
+            afr: 19.7,
+            ve: 50.0,
+            clt: 80.0,
+            tps: 5.0,
+            tps_rate: 0.0,
+            fuel_cut: cut,
+            timestamp_ms: ts,
+            ..Default::default()
+        };
+
+        let run = |cut_at: &dyn Fn(u64) -> Option<bool>| {
+            let mut state = AutoTuneState::new();
+            state.start();
+            for ts in (0..=1200).step_by(100) {
+                state.add_data_point(
+                    point(ts, cut_at(ts)),
+                    &x,
+                    &y,
+                    &settings,
+                    &filters,
+                    &authority,
+                );
+            }
+            state.recommendations.len()
+        };
+
+        // Fuel cut throughout: every charge measured was air.
+        assert_eq!(run(&|_| Some(true)), 0, "air must not teach VE");
+
+        // Never cut: the same readings are ordinary (very lean) data.
+        assert!(run(&|_| Some(false)) > 0, "fuelled samples must be kept");
+
+        // The ECU publishes no flag — unknown must not discard a drive.
+        assert!(run(&|_| None) > 0, "an unknown flag must reject nothing");
+
+        // The discriminating case. Fuel resumes at ts = 1000, so on the last
+        // three samples the engine is fuelling *now* while the charge reaching
+        // the sensor was made 300 ms earlier, during the cut. A test on the
+        // current sample would accept all three; the delayed test rejects them.
+        assert_eq!(
+            run(&|ts| Some(ts < 1000)),
+            0,
+            "a charge made during a cut must be rejected even though fuel is flowing now"
+        );
     }
 
     #[test]
