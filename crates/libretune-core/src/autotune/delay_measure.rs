@@ -112,16 +112,40 @@ pub fn detect_delay(
 
     let mut run = 0usize;
     let mut edge: Option<&AfrSample> = None;
+    // Sample immediately before the crossing, for sub-sample interpolation.
+    let mut before_edge: Option<&AfrSample> = None;
+    let mut prev: Option<&AfrSample> = None;
     for s in post {
         if s.afr < trigger {
             run += 1;
             if run == 1 {
                 edge = Some(s);
+                before_edge = prev;
             }
             if run >= SUSTAIN_SAMPLES {
                 let e = edge.expect("run >= 1 implies edge set");
+
+                // The crossing happened somewhere between the last sample above
+                // the trigger and this first one below it, not exactly when the
+                // sample landed. Reporting the sample time alone biases every
+                // measurement late by half a sample interval on average — 31 ms
+                // at the ~16 Hz these logs actually run at, which is a large
+                // share of a high-flow delay. Interpolate linearly across the
+                // crossing instead.
+                let crossing_ms = match before_edge {
+                    Some(b) if b.afr > e.afr && b.t_ms < e.t_ms => {
+                        let span = (e.t_ms - b.t_ms) as f64;
+                        let frac = ((b.afr - trigger) / (b.afr - e.afr)).clamp(0.0, 1.0);
+                        b.t_ms as f64 + span * frac
+                    }
+                    // No usable prior sample (the crossing is the first sample
+                    // after the anchor): fall back to the sample's own time.
+                    _ => e.t_ms as f64,
+                };
+                let delay_ms = (crossing_ms - anchor_ms as f64).max(0.0);
+
                 return Ok(DelayMeasurement {
-                    delay_ms: e.t_ms.saturating_sub(anchor_ms) as f64,
+                    delay_ms,
                     excursion: baseline - e.afr,
                     baseline_afr: baseline,
                 });
@@ -129,7 +153,9 @@ pub fn detect_delay(
         } else {
             run = 0;
             edge = None;
+            before_edge = None;
         }
+        prev = Some(s);
     }
 
     Err(DelayRejection::NoResponse)
@@ -222,7 +248,50 @@ mod tests {
             .collect()
     }
 
-    /// Clean step: steady 14.7 baseline, response begins 180 ms after anchor.
+    /// The crossing rarely lands exactly on a sample. Reporting the sample's own
+    /// time biases every measurement late by up to a full interval — 63 ms at
+    /// the ~16 Hz these logs run at, which is a big share of a high-flow delay.
+    /// Interpolating across the crossing must land between the two samples and
+    /// close to where the AFR genuinely passed the trigger.
+    #[test]
+    fn crossing_is_interpolated_between_samples() {
+        // Baseline 14.70, MAD ~0 so the trigger is baseline - MIN_EXCURSION_AFR.
+        let pre = trace(&[(0, 14.70), (60, 14.70), (120, 14.70), (180, 14.70)]);
+        // AFR is still at baseline at 240, then well past the trigger at 300:
+        // the true crossing lies between, nearer 300 the deeper the last sample.
+        let post = trace(&[(240, 14.70), (300, 14.30), (360, 14.10), (420, 14.05)]);
+
+        let m = detect_delay(240, &pre, &post).expect("should measure");
+        assert!(
+            m.delay_ms > 0.0 && m.delay_ms < 60.0,
+            "interpolated crossing {:.0} ms must fall inside the 240-300 ms sample gap",
+            m.delay_ms
+        );
+        // Reporting the raw sample time would have given exactly 60 ms.
+        assert!(
+            m.delay_ms < 59.0,
+            "expected sub-sample resolution, got the sample time itself ({:.0} ms)",
+            m.delay_ms
+        );
+    }
+
+    /// When the very first post-anchor sample is already past the trigger there
+    /// is nothing to interpolate from; the sample time is the honest answer and
+    /// must not be mangled into a negative or absurd delay.
+    #[test]
+    fn crossing_on_the_first_sample_falls_back_cleanly() {
+        let pre = trace(&[(0, 14.70), (60, 14.70), (120, 14.70), (180, 14.70)]);
+        let post = trace(&[(240, 14.20), (300, 14.10), (360, 14.05)]);
+        let m = detect_delay(240, &pre, &post).expect("should measure");
+        assert_eq!(
+            m.delay_ms, 0.0,
+            "first sample at the anchor means zero delay"
+        );
+    }
+
+    /// Clean step: steady 14.7 baseline. AFR is still 14.68 at 320 ms and 14.2
+    /// at 380 ms, so it passes the 14.55 trigger at ~336 ms — 136 ms after the
+    /// anchor. Reporting the sample time would say 180 ms, 44 ms late.
     #[test]
     fn clean_step_yields_the_transport_delay() {
         let pre = trace(&[
@@ -242,7 +311,11 @@ mod tests {
             (460, 13.7),
         ]);
         let m = detect_delay(200, &pre, &post).expect("clean step must measure");
-        assert!((m.delay_ms - 180.0).abs() < 1e-9, "got {}", m.delay_ms);
+        assert!(
+            (m.delay_ms - 136.25).abs() < 0.5,
+            "interpolated crossing, got {}",
+            m.delay_ms
+        );
         assert!(m.excursion > 0.4);
         assert!((m.baseline_afr - 14.7).abs() < 0.05);
     }
@@ -264,8 +337,9 @@ mod tests {
         );
     }
 
-    /// Sustained crossing right after a lone spike anchors at the sustained
-    /// run's first sample, not the spike.
+    /// A sustained crossing right after a lone spike anchors on the real run,
+    /// not the spike: the crossing is interpolated between 280 ms (14.7) and
+    /// 320 ms (14.0), giving ~89 ms — comfortably after the 40 ms spike.
     #[test]
     fn edge_anchors_at_the_sustained_run() {
         let pre = trace(&[(0, 14.7), (40, 14.7), (80, 14.7), (120, 14.7)]);
@@ -277,7 +351,11 @@ mod tests {
             (360, 13.8),
         ]);
         let m = detect_delay(200, &pre, &post).expect("must measure");
-        assert!((m.delay_ms - 120.0).abs() < 1e-9, "got {}", m.delay_ms);
+        assert!(
+            (m.delay_ms - 88.6).abs() < 0.5,
+            "must anchor on the sustained run, got {}",
+            m.delay_ms
+        );
     }
 
     #[test]
