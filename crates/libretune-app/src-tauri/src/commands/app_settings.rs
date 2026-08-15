@@ -441,17 +441,67 @@ fn default_settings() -> Settings {
 /// This uses the application-wide units preference as the stand-in, which is a
 /// deliberate approximation: it is correct whenever the preference matches what
 /// the project expects, and wrong for a mixed set of projects. Anything other
-/// than "imperial" (including the empty default) selects Celsius, since every
-/// Speeduino project seen so far declares CELSIUS. Reading the real per-project
-/// `ecuSettings` on import would remove the guesswork.
+/// Symbols declared by the loaded project, if it declared any. These win over
+/// any inference from the app's units preference, because they are the tune's
+/// own statement of how it was built rather than a guess about the user.
+static PROJECT_SYMBOLS: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
+
+/// Read `ecuSettings` from the project.properties sitting beside `ini_path`
+/// and seed the INI parser's conditional symbols from it.
+///
+/// TunerStudio stores, e.g., `ecuSettings=AFR|CELSIUS|enablehardware_test_OFF|`
+/// in `projectCfg/project.properties`, the same folder as the controller INI.
+/// Those tokens are exactly the symbols its `#if` blocks test, so a project
+/// that was built in Celsius says so and no inference is needed.
+///
+/// Must run before the INI is parsed: `#if CELSIUS` is resolved during parsing.
+pub(crate) fn seed_symbols_from_project(ini_path: &Path) {
+    let symbols = ini_path
+        .parent()
+        .map(|dir| dir.join("project.properties"))
+        .filter(|p| p.exists())
+        .and_then(|p| libretune_core::project::Properties::load(&p).ok())
+        .and_then(|props| props.get("ecuSettings").cloned())
+        .map(|raw| {
+            raw.split('|')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+
+    if let Some(symbols) = symbols {
+        tracing::info!(
+            ?symbols,
+            "INI symbols taken from the project's ecuSettings declaration"
+        );
+        if let Ok(mut guard) = PROJECT_SYMBOLS.write() {
+            *guard = Some(symbols.clone());
+        }
+        libretune_core::ini::set_default_symbols(symbols);
+    }
+}
+
+/// Seed the INI parser's conditional symbols.
+///
+/// A project that declares its own `ecuSettings` decides this outright. Only
+/// when there is no such declaration does the app's units preference stand in,
+/// and then an explicit "metric" is required: `units_system` defaults to the
+/// empty string, so treating "not imperial" as metric would switch every
+/// existing install to Celsius whether or not it wanted that.
+///
+/// The gap this leaves is real — a Speeduino project with no ecuSettings and no
+/// units preference reads Fahrenheit values against a Celsius INI — but the
+/// answer to that is to find the project's declaration, not to guess harder.
 pub(crate) fn apply_unit_symbols(settings: &Settings) {
+    if let Ok(guard) = PROJECT_SYMBOLS.read() {
+        if let Some(symbols) = guard.as_ref() {
+            libretune_core::ini::set_default_symbols(symbols.clone());
+            return;
+        }
+    }
+
     let mut symbols: Vec<String> = Vec::new();
-    // ONLY on an explicit metric preference. `units_system` defaults to the
-    // empty string, so treating "not imperial" as metric would have forced
-    // CELSIUS on every existing install that never visited Settings — silently
-    // switching temperatures for users who had been reading Fahrenheit quite
-    // happily. Seeding nothing leaves the INI's own `#else` arm to decide,
-    // which is the behaviour those users already have.
     if settings.units_system.eq_ignore_ascii_case("metric") {
         symbols.push("CELSIUS".to_string());
     }
@@ -640,6 +690,54 @@ mod tests {
             std::fs::read_to_string(&backup_path).unwrap(),
             r#"{"units_system":"metr"#
         );
+    }
+
+    /// The project states its own units; nothing should be inferred from a UI
+    /// preference. This is the real declaration from an NA6 Speeduino project,
+    /// whose `units_system` setting is the empty default — the case where a
+    /// units-preference guess reads Celsius data as Fahrenheit (a 90 C coolant
+    /// showing as 126) or flips a Fahrenheit user to Celsius, depending which
+    /// way the guess is made.
+    #[test]
+    fn project_ecu_settings_decide_the_ini_symbols() {
+        let dir = TempDir::new().unwrap();
+        let cfg = dir.path().join("projectCfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("project.properties"),
+            "projectName=NA6_SPEEDUINO
+             ecuSettings=AFR|CELSIUS|enablehardware_test_OFF|resetcontrol_standard|
+",
+        )
+        .unwrap();
+
+        seed_symbols_from_project(&cfg.join("mainController.ini"));
+
+        let symbols = PROJECT_SYMBOLS.read().unwrap().clone().unwrap();
+        assert!(symbols.iter().any(|s| s == "CELSIUS"));
+        assert!(symbols.iter().any(|s| s == "AFR"));
+        assert_eq!(
+            symbols.len(),
+            4,
+            "trailing empty token must not become a symbol"
+        );
+
+        // And the project's declaration outranks the units preference, so a
+        // user who never opened Settings still gets the tune's own units.
+        let settings = Settings {
+            units_system: String::new(),
+            ..Default::default()
+        };
+        apply_unit_symbols(&settings);
+        assert!(PROJECT_SYMBOLS
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|s| s == "CELSIUS"));
+
+        *PROJECT_SYMBOLS.write().unwrap() = None;
     }
 
     #[test]

@@ -25,6 +25,14 @@ pub async fn load_ini(
     };
 
     println!("Loading INI from: {:?}", full_path);
+
+    // Seed the INI's conditional symbols from the project's own declaration
+    // before parsing, because `#if CELSIUS` blocks are resolved during the
+    // parse. TunerStudio writes them next to the INI in project.properties as
+    // `ecuSettings=AFR|CELSIUS|...`, so the project states which units its
+    // tune was built in and nothing has to be inferred from a UI preference.
+    crate::commands::app_settings::seed_symbols_from_project(&full_path);
+
     match EcuDefinition::from_file(full_path.to_string_lossy().as_ref()) {
         Ok(def) => {
             println!(
