@@ -1415,6 +1415,21 @@ impl Connection {
             EcuType::Speeduino | EcuType::MS2 | EcuType::MS3 | EcuType::Unknown
         );
 
+        // ...but only while talking legacy. Once the CRC handshake succeeds the
+        // ECU is in new-comms mode, where Burst's bare 'A' is not a command at
+        // all: a Speeduino 2025.01.4 answered an unframed 'A' with a framed
+        // error (`00 01 | 80 | crc32`) and ignored a *framed* 'A' entirely
+        // (zero bytes back). New-comms fetches runtime data with the INI's
+        // ochGetCommand — `r $tsCanId 0x30 %2o %2c` — so use OCH there.
+        if self.use_modern_protocol {
+            if let Some(och) = och_cmd_opt.clone() {
+                return (
+                    RuntimeFetch::OCH(och),
+                    "auto: OCH (modern protocol negotiated)".to_string(),
+                );
+            }
+        }
+
         // Unknown ECU type: also default to Burst to be safe. Only rusEFI-lineage
         // ECUs (detected from the INI signature) are allowed to auto-select OCH.
         if burst_ecu {
@@ -1515,16 +1530,21 @@ impl Connection {
 
         match choice {
             RuntimeFetch::Burst(cmd) => {
-                // Issue #71 follow-up: Speeduino / MS2 / MS3 / Unknown must use the
-                // legacy raw-ASCII Burst path even if the handshake or INI somehow
-                // left use_modern_protocol enabled. These ECUs do not accept a
-                // CRC-framed Burst request. rusEFI/FOME/epicEFI keep CRC framing
-                // when modern protocol is active.
-                let force_raw_burst = matches!(
-                    self.ecu_type,
-                    EcuType::Speeduino | EcuType::MS2 | EcuType::MS3 | EcuType::Unknown
-                );
-                if self.use_modern_protocol && !force_raw_burst {
+                // Frame the request whenever the handshake actually negotiated
+                // CRC. `use_modern_protocol` is authoritative here: the
+                // handshake clears it on legacy fallback, so a true value means
+                // the ECU answered a framed command and is now in new-comms
+                // mode — where a bare command byte is rejected.
+                //
+                // This used to force the raw byte for Speeduino/MS2/MS3/Unknown
+                // on the belief that they "do not accept a CRC-framed Burst
+                // request". That belief formed while CRC never negotiated on
+                // those ECUs. Once it did (Speeduino 2025.01.4, big-endian
+                // envelope), the override became the bug: the ECU sat in
+                // new-comms answering every bare 'A' with a framed error
+                // (`00 01 | 80 | crc32`), so realtime data froze at ~14 B/s and
+                // every value went stale while the UI still showed Connected.
+                if self.use_modern_protocol {
                     let expected_len = self
                         .protocol_settings
                         .as_ref()

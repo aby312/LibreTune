@@ -419,11 +419,15 @@ fn parse_ini_internal(content: &str, ctx: &mut IncludeContext) -> Result<EcuDefi
             .and_then(|n| n.to_str()),
     );
 
-    // Speeduino frames its CRC envelope little-endian (comms.cpp: "TS comms
-    // is little-endian"), unlike the big-endian msEnvelope_1.0/rusEFI
-    // convention — the packet layer must match or the handshake deadlocks on
-    // misparsed lengths (see ProtocolSettings::envelope_little_endian).
-    definition.protocol.envelope_little_endian = matches!(definition.ecu_type, EcuType::Speeduino);
+    // Envelope byte order stays at the big-endian msEnvelope_1.0 default.
+    //
+    // This previously forced little-endian for Speeduino, reasoning from a
+    // comms.cpp comment ("TS comms is little-endian"). Real hardware says
+    // otherwise: a Speeduino 2025.01.4 on a Mega2560 answered the CRC
+    // handshake only after the byte order was flipped to BigEndian, and its
+    // replies frame the length big-endian (`00 01 | rc | crc32`). The comment
+    // describes the ECU's internal representation, not the wire envelope. The
+    // handshake's flip-retry still covers a firmware that genuinely differs.
 
     Ok(definition)
 }

@@ -136,6 +136,31 @@ impl CommandBuilder {
                 }
             }
 
+            // Backslash escapes. INI command strings carry literal bytes this
+            // way — Speeduino's ochGetCommand is `r\$tsCanId\x30%2o%2c`, where
+            // `\x30` is the single byte 0x30 selecting the output-channel
+            // block. Without this the four characters `\`, `x`, `3`, `0` went
+            // out verbatim, making a 10-byte request where the ECU expects 7;
+            // it answered with silence and realtime data never arrived.
+            if chars[i] == '\\' && i + 1 < chars.len() {
+                match chars[i + 1] {
+                    'x' | 'X' if i + 3 < chars.len() => {
+                        let hex: String = chars[i + 2..i + 4].iter().collect();
+                        if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                            result.push(b);
+                            i += 4;
+                            continue;
+                        }
+                    }
+                    '\\' => {
+                        result.push(b'\\');
+                        i += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             // Regular character - add as byte
             result.push(chars[i] as u8);
             i += 1;
@@ -158,6 +183,23 @@ pub fn legacy_command(cmd: char) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Speeduino's ochGetCommand is `r\$tsCanId\x30%2o%2c`, where `\x30` is a
+    /// single byte selecting the output-channel block. Emitting it as the four
+    /// characters `\`, `x`, `3`, `0` made a 10-byte request where the ECU
+    /// expects 7 — it answered with silence and realtime data never arrived.
+    #[test]
+    fn hex_escapes_become_single_bytes() {
+        let builder = CommandBuilder::new(true); // Speeduino: little-endian fields
+        let cmd = builder
+            .build_och_command("r\0\\x30%2o%2c", 130)
+            .expect("builds");
+        assert_eq!(
+            cmd,
+            vec![b'r', 0x00, 0x30, 0x00, 0x00, 0x82, 0x00],
+            "r | canid | 0x30 | offset u16 LE | count u16 LE"
+        );
+    }
 
     #[test]
     fn test_read_command_big_endian() {
