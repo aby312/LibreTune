@@ -198,11 +198,13 @@ export const DataLogView: React.FC = () => {
   const [logData, setLogData] = useState<{ x: number; values: Record<string, number> }[]>([]);
   const [availableChannels, setAvailableChannels] = useState<string[]>([]);
   const [selectedChannels, setSelectedChannels] = useState<string[]>(['RPM', 'MAP', 'AFR']);
-  // 50 Hz. Measured end to end on a Speeduino 2025.01.4 / Mega2560: asking for
-  // 50 Hz records ~38 rows/s (the stream poll becomes the limit), against 5.8
-  // rows/s before this was tuned. The link runs about half loaded at that rate,
-  // leaving room for page reads and writes. Drop it if you want smaller files.
-  const [sampleRate, setSampleRate] = useState(50);
+  // 20 Hz, matching the stream's 50 ms poll — logging can never record faster
+  // than the stream polls, so asking for more just misleads. Measured end to
+  // end on a Speeduino 2025.01.4 / Mega2560 this records ~15-18 rows/s, against
+  // 5.8 rows/s before the recorder's rate gate was made jitter-tolerant.
+  // (A 20 ms poll did reach ~38 rows/s, but 50 repaints a second starved the
+  // webview and froze the window on a real car, so the poll rate went back.)
+  const [sampleRate, setSampleRate] = useState(20);
   const [chartSize, setChartSize] = useState({ width: 800, height: 400 });
   const chartContainerRef = useRef<HTMLDivElement>(null);
   

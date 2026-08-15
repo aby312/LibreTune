@@ -170,7 +170,7 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
           </label>
           <label>
             Repeats
-            <input type="number" min={1} max={20} step={1} value={repeats}
+            <input type="number" min={1} max={200} step={1} value={repeats}
               disabled={running}
               onChange={(e) => setRepeats(Number(e.target.value))} />
             <span className="unit">steps</span>

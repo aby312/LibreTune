@@ -53,6 +53,16 @@ const MAX_STEP_PERCENT: f64 = 20.0;
 /// into normal cycle-to-cycle scatter and no delay can be extracted.
 const MIN_STEP_PERCENT: f64 = 3.0;
 
+/// Most steps a single run will perform.
+///
+/// Each step writes and restores one byte, so the cost of more steps is time,
+/// not risk — and the statistics need them: individual measurements scatter by
+/// hundreds of milliseconds, so a trustworthy delay figure comes from many
+/// repeats rather than a few. The cap only stops a mistyped value running for
+/// hours. The previous ceiling of 20 was both low and silent: asking for 100
+/// ran 20 while the dialog still quoted the time for 100.
+const MAX_REPEATS: u32 = 200;
+
 /// Bounds on how long a step is held, in milliseconds.
 const MIN_HOLD_MS: u64 = 500;
 const MAX_HOLD_MS: u64 = 5_000;
@@ -361,7 +371,8 @@ pub async fn run_afr_delay_test(
     let step_percent = step_percent.abs().clamp(MIN_STEP_PERCENT, MAX_STEP_PERCENT);
     let hold_ms = hold_ms.clamp(MIN_HOLD_MS, MAX_HOLD_MS);
     let settle_ms = settle_ms.clamp(MIN_HOLD_MS, MAX_HOLD_MS * 2);
-    let repeats = repeats.clamp(1, 20);
+    let requested_repeats = repeats;
+    let repeats = repeats.clamp(1, MAX_REPEATS);
 
     // Baseline = the tune's warm-plateau WUE value (the INI mandates 100).
     // Reading it up front also fails the run early if the ECU is unreachable,
@@ -423,6 +434,14 @@ pub async fn run_afr_delay_test(
         }
     }
 
+    // If the request was trimmed, say so here rather than quietly running
+    // fewer steps than the operator asked for and than the UI estimated.
+    let clamp_note = if requested_repeats > repeats {
+        format!(" (asked for {requested_repeats}, capped at {repeats})")
+    } else {
+        String::new()
+    };
+
     emit(
         &app,
         DelayTestProgress::plain(
@@ -433,7 +452,8 @@ pub async fn run_afr_delay_test(
             baseline,
             format!(
                 "WUE step {baseline:.0}% -> {enriched:.0}% ({step_percent:.1}% richer), \
-                 {repeats} steps, {hold_ms} ms hold. One byte, RAM only, never burned."
+                 {repeats} steps{clamp_note}, {hold_ms} ms hold. \
+                 One byte, RAM only, never burned."
             ),
         ),
     );

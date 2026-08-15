@@ -1428,6 +1428,19 @@ impl Connection {
                     "auto: OCH (modern protocol negotiated)".to_string(),
                 );
             }
+            // Negotiated CRC but the INI gives us no ochGetCommand. Neither
+            // form of Burst works from here: framed, the ECU returns nothing at
+            // all; unframed, it returns a framed error. Rather than stall the
+            // stream silently, say exactly what is wrong and what fixes it.
+            if burst_ecu {
+                tracing::error!(
+                    ecu = %self.ecu_type.display_name(),
+                    "realtime data unavailable: the CRC handshake succeeded, so the ECU is in \
+                     new-comms mode, but this INI declares no ochGetCommand to read runtime \
+                     data with. Burst ('A') is not a new-comms command. Disable \
+                     messageEnvelopeFormat in the INI to stay on the legacy protocol."
+                );
+            }
         }
 
         // Unknown ECU type: also default to Burst to be safe. Only rusEFI-lineage

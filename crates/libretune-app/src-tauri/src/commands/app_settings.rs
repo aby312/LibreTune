@@ -339,12 +339,18 @@ fn default_settings() -> Settings {
 
 /// Seed the INI preprocessor from the unit preference.
 ///
-/// An INI selects metric units through `#if CELSIUS` blocks, and TunerStudio
-/// defines that symbol from the project's `ecuSettings` line. LibreTune never
-/// carried it, so the Fahrenheit `#else` arm always won: a 23 degC cold start
-/// showed 73 on the gauge, labelled with the INI's generic "TEMP". Applying it
-/// here covers every definition load, since they all funnel through the same
-/// parser.
+/// An INI selects metric units through `#if CELSIUS` blocks. TunerStudio
+/// defines that symbol per project, from its `ecuSettings` line; LibreTune has
+/// no equivalent per-project setting and does not parse `ecuSettings`, so the
+/// Fahrenheit `#else` arm always won — a 23 degC cold start showed 73 on the
+/// gauge under the INI's generic "TEMP" label.
+///
+/// This uses the application-wide units preference as the stand-in, which is a
+/// deliberate approximation: it is correct whenever the preference matches what
+/// the project expects, and wrong for a mixed set of projects. Anything other
+/// than "imperial" (including the empty default) selects Celsius, since every
+/// Speeduino project seen so far declares CELSIUS. Reading the real per-project
+/// `ecuSettings` on import would remove the guesswork.
 pub(crate) fn apply_unit_symbols(settings: &Settings) {
     let mut symbols: Vec<String> = Vec::new();
     if !settings.units_system.eq_ignore_ascii_case("imperial") {
