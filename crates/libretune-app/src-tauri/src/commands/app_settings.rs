@@ -446,7 +446,13 @@ fn default_settings() -> Settings {
 /// `ecuSettings` on import would remove the guesswork.
 pub(crate) fn apply_unit_symbols(settings: &Settings) {
     let mut symbols: Vec<String> = Vec::new();
-    if !settings.units_system.eq_ignore_ascii_case("imperial") {
+    // ONLY on an explicit metric preference. `units_system` defaults to the
+    // empty string, so treating "not imperial" as metric would have forced
+    // CELSIUS on every existing install that never visited Settings — silently
+    // switching temperatures for users who had been reading Fahrenheit quite
+    // happily. Seeding nothing leaves the INI's own `#else` arm to decide,
+    // which is the behaviour those users already have.
+    if settings.units_system.eq_ignore_ascii_case("metric") {
         symbols.push("CELSIUS".to_string());
     }
     libretune_core::ini::set_default_symbols(symbols);

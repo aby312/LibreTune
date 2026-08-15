@@ -39,6 +39,15 @@ pub async fn start_autotune(
         "No ECU definition loaded".to_string()
     })?;
     let definition_signature = def.signature.clone();
+    // Speeduino's AFR output channel is a byte scaled by 0.1, and it parks at
+    // 19.7 when the wideband is out of range. Other ECU families scale their
+    // AFR/lambda channels differently and 19.7 may be an ordinary reading, so
+    // claim a rail only where it is actually known.
+    let afr_rail = if matches!(def.ecu_type, libretune_core::ini::EcuType::Speeduino) {
+        19.7
+    } else {
+        f64::NAN
+    };
     let cache_guard = state.tune_cache.lock().await;
     let cache = cache_guard.as_ref();
 
@@ -192,6 +201,8 @@ pub async fn start_autotune(
         secondary_y_bins,
         last_tps: None,
         last_timestamp_ms: None,
+        afr_validity: Default::default(),
+        afr_rail,
         reference_tables: reference_tables.clone(),
         strict_lambda_match: strict,
     };

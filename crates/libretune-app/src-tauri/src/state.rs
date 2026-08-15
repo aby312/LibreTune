@@ -162,6 +162,15 @@ pub struct AutoTuneConfig {
     pub secondary_y_bins: Option<Vec<f64>>,
     pub last_tps: Option<f64>,
     pub last_timestamp_ms: Option<u64>,
+    /// Rejects wideband readings that are being held rather than measured —
+    /// the out-of-range rail, a controller's startup/calibration output, or a
+    /// frozen channel. Stateful because the test is how long a value has stood
+    /// still, not what the value is.
+    pub afr_validity: libretune_core::autotune::afr_validity::AfrValidity,
+    /// This channel's out-of-range AFR value, or NaN when unknown. Only a
+    /// known rail can be treated as a status value; for every other ECU the
+    /// validity check falls back to the value-agnostic frozen-channel rule.
+    pub afr_rail: f64,
     /// Per-cell Target AFR / lambda delay reference tables for the session.
     /// Empty by default → AutoTune falls back to settings.target_afr and the
     /// RPM-based delay curve. See bug #14.

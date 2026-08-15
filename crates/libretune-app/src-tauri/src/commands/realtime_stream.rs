@@ -267,6 +267,26 @@ pub(crate) async fn feed_autotune_data(
         .map(|v| if *v < 2.0 { *v * 14.7 } else { *v }) // Convert lambda to AFR
         .unwrap_or(14.7);
 
+    // Drop readings the wideband is holding rather than measuring: the
+    // out-of-range rail, a controller's startup/calibration output, or a frozen
+    // channel. On one 59-minute drive this is 10.6% of running samples, all of
+    // it the 19.7 rail during overrun, every one of which previously fed VE
+    // learning as a genuine lean reading.
+    let afr_rail = config.afr_rail;
+    if let Some(reason) = config.afr_validity.check(afr, current_time_ms, afr_rail) {
+        static AFR_REJECT_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = AFR_REJECT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 3 || n.is_multiple_of(500) {
+            tracing::debug!(
+                "autotune: sample dropped ({}), afr={:.2}, total dropped={}",
+                reason.label(),
+                afr,
+                n + 1
+            );
+        }
+        return;
+    }
+
     let ve = data
         .get("ve")
         .or_else(|| data.get("VE"))

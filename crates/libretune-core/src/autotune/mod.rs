@@ -14,6 +14,7 @@
 //! - Tune health scoring with per-region quality assessment
 
 pub mod accel_enrich;
+pub mod afr_validity;
 pub mod anomaly;
 pub mod delay_measure;
 pub mod health;
@@ -802,10 +803,22 @@ impl AutoTuneState {
 /// returned table matches, ready for [`AutoTuneState::set_reference_tables`].
 /// Idle is treated as the modelled maximum (cells below the anchor flow clamp
 /// to `idle_delay_ms`).
-/// Milliseconds per crank revolution pair, i.e. one full four-stroke cycle:
-/// 2 revs x 60 s x 1000 ms. Divided by rpm this is the time for a fuelling
-/// change to reach the exhaust, independent of load.
-const CYCLE_MS_PER_RPM: f64 = 120_000.0;
+/// Crank revolutions per engine cycle. **Assumes four-stroke.**
+///
+/// A two-stroke or rotary completes a cycle every revolution, so its cycle
+/// delay is half this, and the model will overstate the rpm-dependent term for
+/// those engines. Nothing currently plumbs the engine's stroke type this far
+/// (`basemap::engine_spec::StrokeType` knows about it, but is a separate
+/// subsystem and is not consulted here), and the practical impact is limited:
+/// the caller supplies the two anchor points, so the curve still passes
+/// through them and the error is confined to the shape between. Fixing it
+/// properly means carrying stroke type into the autotune session.
+const REVS_PER_CYCLE: f64 = 2.0;
+
+/// Milliseconds of cycle time per rpm: revolutions per cycle x 60 s x 1000 ms.
+/// Divided by rpm this is how long a fuelling change takes to reach the
+/// exhaust, independent of load.
+const CYCLE_MS_PER_RPM: f64 = 60_000.0 * REVS_PER_CYCLE;
 
 pub fn compute_flow_scaled_delay_table(
     ve_table: &[Vec<f64>],
