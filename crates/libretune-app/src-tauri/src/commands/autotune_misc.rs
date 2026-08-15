@@ -301,18 +301,28 @@ pub async fn send_autotune_recommendations(
 
     let raw_data = conn.read_memory(params).map_err(|e| e.to_string())?;
 
-    // Convert to display values
+    // Decode the table the ECU actually returned. A cell that will not decode
+    // used to become 0.0, and since the whole array is written back below, that
+    // put a zero-fuel cell into a live VE table - the engine leans out wherever
+    // the tune passes through it. A short read is the realistic way to get
+    // here, and it silently affects every cell after the truncation point.
+    //
+    // There is no safe value to substitute, so refuse the apply instead.
     let mut values: Vec<f64> = Vec::with_capacity(element_count);
     for i in 0..element_count {
         let offset = i * element_size;
-        if let Some(raw_val) = constant
+        let raw_val = constant
             .data_type
             .read_from_bytes(&raw_data, offset, endianness)
-        {
-            values.push(constant.raw_to_display(raw_val));
-        } else {
-            values.push(0.0);
-        }
+            .ok_or_else(|| {
+                format!(
+                    "Refusing to apply: cell {i} of {element_count} could not be read back from \
+                     the ECU ({} bytes returned for a {length}-byte table). Applying would write \
+                     a zero into a live fuel table. Re-sync the ECU and try again.",
+                    raw_data.len()
+                )
+            })?;
+        values.push(constant.raw_to_display(raw_val));
     }
 
     // Apply recommendations
