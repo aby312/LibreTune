@@ -240,6 +240,19 @@ async fn wue_slot(state: &AppState, write: Option<u8>) -> Result<u8, String> {
             .constants
             .get(WUE_CONSTANT)
             .ok_or_else(|| format!("{WUE_CONSTANT} not found in this INI"))?;
+        // Never compute an offset past the curve the INI actually declares.
+        // Speeduino ships `wueRates = array, U08, 4, [10]`, so slot 9 is the
+        // last valid one — but a fork or an older firmware with a shorter
+        // curve would otherwise have this write a live byte into whichever
+        // constant follows it in the page, on a running engine.
+        let count = c.shape.element_count();
+        if count <= WUE_LAST_SLOT {
+            return Err(format!(
+                "{WUE_CONSTANT} declares {count} element(s); the delay test needs at least {}. \
+                 This firmware's warm-up curve is too short for the test to drive it safely.",
+                WUE_LAST_SLOT + 1
+            ));
+        }
         let elem = c.data_type.size_bytes().max(1);
         (c.page, c.offset + (WUE_LAST_SLOT * elem) as u16)
     };
