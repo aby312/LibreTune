@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::commands::string_context::refresh_inc_table_paths;
 use crate::paths::get_definitions_dir;
-use crate::{load_settings, save_settings, AppState};
+use crate::{with_settings, AppState};
 use libretune_core::ini::EcuDefinition;
 use libretune_core::realtime::Evaluator;
 use libretune_core::tune::TuneCache;
@@ -325,9 +325,10 @@ pub async fn load_ini(
                 def_clone.tables.len(), def_clone.curves.len(), def_clone.dialogs.len());
 
             // Save as last INI
-            let mut settings = load_settings(&app);
-            settings.last_ini_path = Some(full_path.to_string_lossy().to_string());
-            save_settings(&app, &settings);
+            let last_ini_path = full_path.to_string_lossy().to_string();
+            with_settings(&app, |settings| {
+                settings.last_ini_path = Some(last_ini_path)
+            });
 
             Ok(())
         }

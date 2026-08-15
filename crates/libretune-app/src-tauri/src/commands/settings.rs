@@ -1,6 +1,6 @@
 //! Application settings commands.
 
-use crate::{load_settings, save_settings, Settings};
+use crate::{load_settings, with_settings, Settings};
 use tauri::Emitter;
 
 /// Get application settings
@@ -207,9 +207,7 @@ pub async fn update_setting(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let mut settings = load_settings(&app);
-    apply_setting(&mut settings, &key, &value)?;
-    save_settings(&app, &settings);
+    with_settings(&app, |settings| apply_setting(settings, &key, &value))?;
     let _ = app.emit("settings:changed", key.clone());
     Ok(())
 }
@@ -223,16 +221,16 @@ pub async fn update_settings(
     app: tauri::AppHandle,
     updates: Vec<(String, String)>,
 ) -> Result<(), String> {
-    let mut settings = load_settings(&app);
     let mut errors: Vec<String> = Vec::new();
     let mut changed_keys: Vec<String> = Vec::new();
-    for (key, value) in &updates {
-        match apply_setting(&mut settings, key, value) {
-            Ok(()) => changed_keys.push(key.clone()),
-            Err(e) => errors.push(format!("{}: {}", key, e)),
+    with_settings(&app, |settings| {
+        for (key, value) in &updates {
+            match apply_setting(settings, key, value) {
+                Ok(()) => changed_keys.push(key.clone()),
+                Err(e) => errors.push(format!("{}: {}", key, e)),
+            }
         }
-    }
-    save_settings(&app, &settings);
+    });
     // Notify listeners that settings changed (one event rather than N).
     let _ = app.emit("settings:changed", "__batch__");
     if errors.is_empty() {
@@ -249,15 +247,19 @@ pub async fn update_heatmap_custom_stops(
     context: String,
     stops: Vec<String>,
 ) -> Result<(), String> {
-    let mut settings = load_settings(&app);
-
-    match context.as_str() {
-        "value" => settings.heatmap_value_custom = stops,
-        "change" => settings.heatmap_change_custom = stops,
-        "coverage" => settings.heatmap_coverage_custom = stops,
-        _ => return Err(format!("Unknown heatmap context: {}", context)),
-    }
-
-    save_settings(&app, &settings);
-    Ok(())
+    with_settings(&app, move |settings| match context.as_str() {
+        "value" => {
+            settings.heatmap_value_custom = stops;
+            Ok(())
+        }
+        "change" => {
+            settings.heatmap_change_custom = stops;
+            Ok(())
+        }
+        "coverage" => {
+            settings.heatmap_coverage_custom = stops;
+            Ok(())
+        }
+        _ => Err(format!("Unknown heatmap context: {}", context)),
+    })
 }

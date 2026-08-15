@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use tauri::Emitter;
 
-use crate::{load_settings, save_settings};
+use crate::{load_settings, with_settings};
 
 /// Get current hotkey bindings from settings.
 #[tauri::command]
@@ -18,9 +18,7 @@ pub async fn save_hotkey_bindings(
     app: tauri::AppHandle,
     bindings: HashMap<String, String>,
 ) -> Result<(), String> {
-    let mut settings = load_settings(&app);
-    settings.hotkey_bindings = bindings;
-    save_settings(&app, &settings);
+    with_settings(&app, move |settings| settings.hotkey_bindings = bindings);
     let _ = app.emit("settings:hotkeys_changed", ());
     Ok(())
 }
@@ -28,9 +26,7 @@ pub async fn save_hotkey_bindings(
 /// Mark onboarding as completed.
 #[tauri::command]
 pub async fn mark_onboarding_completed(app: tauri::AppHandle) -> Result<(), String> {
-    let mut settings = load_settings(&app);
-    settings.onboarding_completed = true;
-    save_settings(&app, &settings);
+    with_settings(&app, |settings| settings.onboarding_completed = true);
     Ok(())
 }
 

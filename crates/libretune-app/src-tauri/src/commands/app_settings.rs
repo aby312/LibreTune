@@ -231,15 +231,85 @@ fn default_commit_message_format() -> String {
     "Tune saved on {date} at {time}".to_string()
 }
 
-pub(crate) fn save_settings(app: &tauri::AppHandle, settings: &Settings) {
+/// Serializes every settings read-modify-write cycle against every other
+/// caller in this process.
+///
+/// Root cause of the recurring `[WARN] Failed to save settings: ... (os
+/// error 2)`: the frontend fires several independent `update_setting`
+/// invokes back-to-back with no ordering between them (e.g. on launch,
+/// `App.tsx` has separate `useEffect`s that each persist `sidebar_visible`,
+/// `show_ecu_menus_in_menubar`, and `agent_panel_visible` the moment
+/// `uiStateRestored` flips; `useHeatmapSettings.ts`'s `setAllSchemes` fires
+/// three `update_setting` calls via `Promise.all`). Each is a separate Tauri
+/// `async fn` command that previously called bare `load_settings` +
+/// `save_settings` with no coordination, and every concurrent writer shared
+/// the *same* hardcoded staging file (`settings.json.tmp` — see
+/// `write_settings_atomic`). Two interleavings were both observed in the
+/// field:
+///   - Writer A finishes and `rename`s the staging file onto `settings.json`
+///     first. Writer B then tries to `rename` the same staging path, finds
+///     it already consumed, and fails with `ERROR_FILE_NOT_FOUND` (os error
+///     2) — this is the exact warning from the bug report, and it fires on
+///     almost every launch because the launch-time UI-restore effects above
+///     race every time.
+///   - Writer B's `File::create` (which truncates) lands *between* writer
+///     A's `write_all` and its `rename`. The file that gets renamed onto
+///     `settings.json` is then B's partially-written content — which is
+///     exactly the separate "settings.json failed to parse (trailing
+///     characters ...)" warning seen in the same logs.
+///
+/// Even when the I/O itself doesn't collide, two concurrent commands that
+/// each `load_settings` before either has saved will race on which one's
+/// in-memory copy wins: the second save silently clobbers whatever field
+/// the first save just persisted (a lost update) — this is how a setting
+/// like `onboarding_completed` can revert without either write reporting an
+/// error.
+///
+/// Locking the *entire* load -> mutate -> save cycle (not just the write)
+/// closes all three: every mutation now serializes against the others, so
+/// each sees the freshest on-disk state and no two writers ever touch the
+/// staging file at the same time. Prefer this over pairing `load_settings` +
+/// `save_settings` manually for any mutation.
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` against the current on-disk settings and persist the result
+/// (unconditionally, even if `f` reports failure via its return value — see
+/// `SETTINGS_LOCK` for why the whole cycle, not just the write, is locked).
+/// `f` mutates in place only on success in every call site today, so this is
+/// a no-op rewrite of identical content on the error paths, not data loss.
+pub(crate) fn with_settings<R>(app: &tauri::AppHandle, f: impl FnOnce(&mut Settings) -> R) -> R {
+    with_settings_at(&get_settings_path(app), f)
+}
+
+/// Path-based core of [`with_settings`], split out so the concurrency fix
+/// can be regression-tested against a tempdir instead of a real Tauri
+/// `AppHandle` (which would otherwise mean either standing up a mocked
+/// Tauri runtime or, worse, resolving to the user's real
+/// `%AppData%/com.libretune.app/settings.json`).
+fn with_settings_at<R>(settings_path: &Path, f: impl FnOnce(&mut Settings) -> R) -> R {
+    // Held across the whole read-modify-write cycle. A poisoned lock still
+    // yields the guard: a previous panic inside `f` says nothing about the
+    // file's integrity, and refusing to save afterwards would turn one
+    // failure into every subsequent setting silently not persisting.
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = load_settings_from_path(settings_path);
+    let result = f(&mut settings);
+    save_settings_to_path(settings_path, &settings);
+    result
+}
+
+fn save_settings_to_path(settings_path: &Path, settings: &Settings) {
     apply_unit_symbols(settings);
-    let settings_path = get_settings_path(app);
     // Ensure parent directory exists
     if let Some(parent) = settings_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = write_settings_atomic(&settings_path, settings) {
-        eprintln!("[WARN] Failed to save settings: {}", e);
+    if let Err(e) = write_settings_atomic(settings_path, settings) {
+        eprintln!(
+            "[WARN] Failed to save settings to {}: {}",
+            settings_path.display(),
+            e
+        );
     }
 }
 
@@ -255,13 +325,36 @@ pub(crate) fn save_settings(app: &tauri::AppHandle, settings: &Settings) {
 fn write_settings_atomic(path: &Path, settings: &Settings) -> io::Result<()> {
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let tmp_path = path.with_extension("json.tmp");
-    {
+    // Unique staging name per write. `SETTINGS_LOCK` serialises writers inside
+    // one process, but a second app instance is a second process and shares no
+    // lock — and this app gets relaunched constantly. With a fixed
+    // `settings.json.tmp` the two instances collide exactly as concurrent
+    // threads did: one renames the staging file away, the other's rename fails
+    // with ERROR_FILE_NOT_FOUND, or one truncates it mid-write and the partial
+    // content gets renamed into place.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp_path = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let staged = (|| -> io::Result<()> {
         let mut file = File::create(&tmp_path)?;
         file.write_all(json.as_bytes())?;
-        file.sync_all()?;
+        file.sync_all()
+    })();
+    if let Err(e) = staged {
+        // Never leave a half-written staging file lying about.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
-    std::fs::rename(&tmp_path, path)
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
 }
 
 /// Helper exposed to extracted command modules: returns the commit message format string.
@@ -360,9 +453,12 @@ pub(crate) fn apply_unit_symbols(settings: &Settings) {
 }
 
 pub(crate) fn load_settings(app: &tauri::AppHandle) -> Settings {
-    let settings_path = get_settings_path(app);
-    if let Ok(content) = std::fs::read_to_string(&settings_path) {
-        if let Some(mut settings) = parse_settings_or_backup(&settings_path, &content) {
+    load_settings_from_path(&get_settings_path(app))
+}
+
+fn load_settings_from_path(settings_path: &Path) -> Settings {
+    if let Ok(content) = std::fs::read_to_string(settings_path) {
+        if let Some(mut settings) = parse_settings_or_backup(settings_path, &content) {
             if settings.runtime_packet_mode.trim().is_empty() {
                 settings.runtime_packet_mode = default_runtime_packet_mode();
             }
@@ -437,6 +533,72 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let loaded: Settings = serde_json::from_str(&content).unwrap();
         assert_eq!(loaded.units_system, "imperial");
+    }
+
+    #[test]
+    fn with_settings_at_serializes_concurrent_writers_without_corruption() {
+        // Regression test for the recurring "[WARN] Failed to save settings:
+        // The system cannot find the file specified. (os error 2)" bug.
+        // Real repro shape: several Tauri commands (update_setting fired
+        // from independent frontend useEffects on launch, update_settings,
+        // save_hotkey_bindings, ...) each did a bare load_settings +
+        // save_settings with no coordination, so concurrent writers shared
+        // the *same* `settings.json.tmp` staging file. Depending on timing
+        // that raced two ways: the loser's `rename` found its staging file
+        // already consumed by the winner (os error 2, this crate's
+        // symptom), or a winner's `File::create` truncation landed between
+        // another writer's `write_all` and its `rename`, corrupting
+        // settings.json with truncated JSON (the separate "trailing
+        // characters" parse warning). `with_settings_at` closes both by
+        // locking the whole load-mutate-save cycle, not just the write.
+        //
+        // Reproduce the concurrency shape directly (many threads racing a
+        // full read-modify-write cycle against one path) and assert two
+        // things the old unlocked code could not guarantee: every write
+        // succeeds (no panics, no os-error-2-style failure) and every
+        // writer's contribution survives (no lost updates from one
+        // writer's stale in-memory copy clobbering another's).
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+
+        const WRITERS: i32 = 32;
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    with_settings_at(&path, |settings| {
+                        settings.table_trail_fade_sec = i as f64;
+                        settings
+                            .hotkey_bindings
+                            .insert(format!("k{i}"), format!("v{i}"));
+                    });
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("writer thread should not panic");
+        }
+
+        // No leftover staging file from a losing writer's failed rename.
+        assert!(!path.with_extension("json.tmp").exists());
+
+        // The final file must be intact, valid JSON, not truncated by a
+        // racing writer's File::create landing mid another writer's write.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: Settings = serde_json::from_str(&content)
+            .expect("settings.json must stay valid JSON under concurrent writers");
+
+        // Every writer's map insert must be preserved: with the whole
+        // load-mutate-save cycle serialized, each writer's load reflects
+        // every prior writer's save, so nothing gets lost.
+        assert_eq!(
+            settings.hotkey_bindings.len(),
+            WRITERS as usize,
+            "every concurrent writer's update should be preserved, not clobbered by a lost-update race"
+        );
+        let winner = settings.table_trail_fade_sec as i32;
+        assert!((0..WRITERS).contains(&winner));
+        assert!(settings.hotkey_bindings.contains_key(&format!("k{winner}")));
     }
 
     #[test]

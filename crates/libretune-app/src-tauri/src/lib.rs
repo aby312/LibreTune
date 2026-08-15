@@ -19,7 +19,7 @@ use state::{AppState, AutoTuneLoadSource, RpmState, RpmStateTracker, StreamStats
 
 // Re-exports for cross-module use within the crate.
 pub(crate) use commands::app_settings::{
-    get_commit_message_format, load_settings, save_settings, Settings,
+    get_commit_message_format, load_settings, with_settings, Settings,
 };
 pub(crate) use commands::signature_helpers::{
     call_connection_factory_and_build_result, find_matching_inis_internal,

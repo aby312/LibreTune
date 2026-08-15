@@ -1,8 +1,6 @@
 //! create_project and open_project commands (extracted from lib.rs).
 
-use crate::{
-    load_settings, save_settings, AppState, ConnectionSettingsResponse, CurrentProjectInfo,
-};
+use crate::{with_settings, AppState, ConnectionSettingsResponse, CurrentProjectInfo};
 use libretune_core::ini::EcuDefinition;
 use libretune_core::project::{load_math_channels, Project};
 use libretune_core::tune::{TuneCache, TuneFile};
@@ -211,14 +209,16 @@ pub async fn open_project(
     eprintln!("[INFO] INI signature: '{}'", def.signature);
     eprintln!("[INFO] INI has {} constants", def.constants.len());
 
-    // Save as last opened project
-    {
-        let mut settings = load_settings(&app);
+    // Save as last opened project. `with_settings` always persists (see its
+    // doc comment on why the whole load-mutate-save cycle must be locked
+    // together rather than only the write) so this is a harmless rewrite of
+    // identical content when the path is unchanged, not a functional no-op
+    // skip like the old code's `if` guard.
+    with_settings(&app, |settings| {
         if settings.last_project_path.as_deref() != Some(&path) {
             settings.last_project_path = Some(path.clone());
-            save_settings(&app, &settings);
         }
-    }
+    });
 
     // Load user math channels
     let math_channels_path = project.path.join("math_channels.json");
