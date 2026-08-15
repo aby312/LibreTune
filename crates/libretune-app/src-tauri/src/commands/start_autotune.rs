@@ -62,6 +62,26 @@ pub async fn start_autotune(
         .filter(|v| *v > 1.0)
         .unwrap_or(14.7);
 
+    // `min_clt` is compared against the coolant channel, and the INI defines
+    // that channel in whichever units the CELSIUS symbol selects. The struct
+    // default was a bare 160, which is a sensible Fahrenheit warm-engine
+    // threshold and nonsense in Celsius - it sits above the boiling point, so
+    // it rejects every sample a warm engine can produce.
+    //
+    // The UI supplies its own value so this default rarely applies there, but
+    // anything that builds filters directly (or omits the field from the
+    // payload, which serde fills from Default) got the wrong one.
+    let mut filters = filters;
+    if (filters.min_clt - AutoTuneFilters::default().min_clt).abs() < f64::EPSILON {
+        let celsius = libretune_core::ini::symbol_is_active("CELSIUS");
+        filters.min_clt = if celsius { 60.0 } else { 140.0 };
+        tracing::info!(
+            min_clt = filters.min_clt,
+            units = if celsius { "C" } else { "F" },
+            "min_clt left at its default; set from the INI's temperature units"
+        );
+    }
+
     let mut resolved_load_source = load_source.unwrap_or(AutoTuneLoadSource::Map);
 
     // Find the table and extract bins
@@ -350,10 +370,35 @@ fn resolve_reference_tables(
     target_afr_table_name: Option<&str>,
     lambda_delay_table_name: Option<&str>,
 ) -> AutoTuneReferenceTables {
+    // The INI states which table is the AFR/lambda target: Speeduino declares
+    // `veAnalyzeMap = veTable1Tbl, afrTable1Tbl, afr, egoCorrection` (and the
+    // lambda variant under `#if LAMBDA`), and the parser already turns that
+    // into `TableRole::AfrTarget`. Use it, rather than guessing from a list of
+    // likely names.
+    //
+    // Guessing is not merely untidy here: the old candidate list contained both
+    // `afrTable` and `lambdaTable`, so on a lambda-target INI it could pick a
+    // table holding ~0.88 and compare it against a measured AFR of ~13. The
+    // resulting correction is VE x 14.8 - the authority ceiling, on every pass.
+    let declared_target: Option<&str> = def
+        .tables
+        .values()
+        .find(|t| t.role == libretune_core::ini::TableRole::AfrTarget)
+        .map(|t| t.name.as_str());
+
+    if target_afr_table_name.is_none() {
+        match declared_target {
+            Some(name) => tracing::info!(table = name, "AFR target table declared by the INI"),
+            None => tracing::warn!(
+                "INI declares no AFR target table; falling back to name matching,                  which cannot tell an AFR table from a lambda one"
+            ),
+        }
+    }
+
     let target_afr_table = resolve_named_table(
         def,
         cache,
-        target_afr_table_name,
+        target_afr_table_name.or(declared_target),
         &[
             "afrTable",
             "afr_target",
