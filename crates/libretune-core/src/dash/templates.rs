@@ -1074,6 +1074,366 @@ fn log_multi_trend(
     }))
 }
 
+/// Base `TelemetryStat` tile for the modern Tuning dashboard: a flat dark card
+/// with a colored accent stripe, a big legible value, and a min/max range bar.
+/// Callers override warnings / `extra_attrs` (e.g. an AFR target marker) via
+/// struct-update syntax over this base.
+#[allow(clippy::too_many_arguments)]
+fn modern_stat(
+    id: &'static str,
+    title: &'static str,
+    units: &'static str,
+    channel: &'static str,
+    min: f64,
+    max: f64,
+    digits: i32,
+    accent: TsColor,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    font_adj: i32,
+) -> GaugeConfig {
+    GaugeConfig {
+        id: id.to_string(),
+        title: title.to_string(),
+        units: units.to_string(),
+        output_channel: channel.to_string(),
+        min,
+        max,
+        value_digits: digits,
+        gauge_painter: GaugePainter::TelemetryStat,
+        relative_x: x,
+        relative_y: y,
+        relative_width: w,
+        relative_height: h,
+        back_color: LT_GAUGE_BG,
+        font_color: accent.clone(),
+        needle_color: accent,
+        trim_color: LT_TEXT_SECONDARY,
+        warn_color: LT_WARN_COLOR,
+        critical_color: LT_CRITICAL_COLOR,
+        border_width: 1,
+        font_size_adjustment: font_adj,
+        shortest_size: 0,
+        ..Default::default()
+    }
+}
+
+/// `extra_attrs` map carrying a live target-marker channel for `TelemetryStat`
+/// (the AFR card marks its current AFR target on the range bar via this).
+fn target_attr(channel: &'static str) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("lt_target_channel".to_string(), channel.to_string());
+    m
+}
+
+/// Road Test: the dashboard to drive with. Three large primary cards (RPM, AFR vs
+/// target, MAP), a row of secondary readouts, and a multi-channel live trend.
+/// Uses the flat `TelemetryStat` tiles for big, legible values with no gauge
+/// clutter, and shows AFR against its live target — the core VE-tuning signal —
+/// as a marker on the AFR card's range bar.
+pub fn create_road_test_dashboard() -> DashFile {
+    let mut dash = DashFile {
+        bibliography: Bibliography {
+            author: "LibreTune".to_string(),
+            company: "LibreTune Project".to_string(),
+            write_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        },
+        version_info: VersionInfo {
+            file_format: "3.0".to_string(),
+            firmware_signature: None,
+        },
+        gauge_cluster: GaugeCluster {
+            anti_aliasing: true,
+            force_aspect: false,
+            force_aspect_width: 0.0,
+            force_aspect_height: 0.0,
+            cluster_background_color: LT_DARKER_BG,
+            background_dither_color: None,
+            cluster_background_image_file_name: None,
+            cluster_background_image_style: BackgroundStyle::Stretch,
+            embedded_images: Vec::new(),
+            components: Vec::new(),
+            cluster_layout: None,
+            enabled_condition: None,
+            extra_attrs: std::collections::BTreeMap::new(),
+        },
+        additional_clusters: Vec::new(),
+        extra_attrs: std::collections::BTreeMap::new(),
+    };
+
+    let push = |dash: &mut DashFile, g: GaugeConfig| {
+        dash.gauge_cluster
+            .components
+            .push(DashComponent::Gauge(Box::new(g)));
+    };
+
+    // ---- Primary row: the three channels you tune on, large. ----
+    push(
+        &mut dash,
+        GaugeConfig {
+            high_warning: Some(6500.0),
+            high_critical: Some(7200.0),
+            ..modern_stat(
+                "rpm",
+                "RPM",
+                "rpm",
+                "rpm",
+                0.0,
+                8000.0,
+                0,
+                LT_ACCENT_BLUE,
+                0.02,
+                0.03,
+                0.305,
+                0.26,
+                2,
+            )
+        },
+    );
+    push(
+        &mut dash,
+        GaugeConfig {
+            low_critical: Some(10.5),
+            low_warning: Some(11.5),
+            high_warning: Some(16.0),
+            high_critical: Some(17.5),
+            extra_attrs: target_attr("afrTarget"),
+            ..modern_stat(
+                "afr",
+                "AFR",
+                ":1",
+                "afr",
+                10.0,
+                20.0,
+                1,
+                LT_ACCENT_GREEN,
+                0.3425,
+                0.03,
+                0.305,
+                0.26,
+                2,
+            )
+        },
+    );
+    push(
+        &mut dash,
+        GaugeConfig {
+            high_warning: Some(100.0),
+            ..modern_stat(
+                "map",
+                "MAP",
+                "kPa",
+                "map",
+                0.0,
+                110.0,
+                0,
+                LT_ACCENT_TEAL,
+                0.675,
+                0.03,
+                0.305,
+                0.26,
+                2,
+            )
+        },
+    );
+
+    // ---- Secondary row: supporting channels, medium. ----
+    push(
+        &mut dash,
+        modern_stat(
+            "ve",
+            "VE",
+            "%",
+            "ve",
+            0.0,
+            150.0,
+            0,
+            LT_ACCENT_AMBER,
+            0.02,
+            0.31,
+            0.1125,
+            0.15,
+            0,
+        ),
+    );
+    push(
+        &mut dash,
+        modern_stat(
+            "timing",
+            "TIMING",
+            "\u{00B0}",
+            "advance",
+            -10.0,
+            50.0,
+            0,
+            LT_ACCENT_BLUE,
+            0.1425,
+            0.31,
+            0.1125,
+            0.15,
+            0,
+        ),
+    );
+    push(
+        &mut dash,
+        GaugeConfig {
+            high_warning: Some(105.0),
+            high_critical: Some(118.0),
+            ..modern_stat(
+                "coolant",
+                "CLT",
+                "\u{00B0}C",
+                "coolant",
+                -20.0,
+                130.0,
+                0,
+                LT_ACCENT_AMBER,
+                0.265,
+                0.31,
+                0.1125,
+                0.15,
+                0,
+            )
+        },
+    );
+    push(
+        &mut dash,
+        modern_stat(
+            "iat",
+            "IAT",
+            "\u{00B0}C",
+            "iat",
+            -20.0,
+            80.0,
+            0,
+            LT_ACCENT_BLUE,
+            0.3875,
+            0.31,
+            0.1125,
+            0.15,
+            0,
+        ),
+    );
+    push(
+        &mut dash,
+        modern_stat(
+            "tps",
+            "TPS",
+            "%",
+            "tps",
+            0.0,
+            100.0,
+            0,
+            LT_ACCENT_TEAL,
+            0.51,
+            0.31,
+            0.1125,
+            0.15,
+            0,
+        ),
+    );
+    push(
+        &mut dash,
+        modern_stat(
+            "pw",
+            "PW",
+            "ms",
+            "pulseWidth",
+            0.0,
+            25.0,
+            2,
+            LT_ACCENT_GREEN,
+            0.6325,
+            0.31,
+            0.1125,
+            0.15,
+            0,
+        ),
+    );
+    push(
+        &mut dash,
+        GaugeConfig {
+            high_warning: Some(85.0),
+            high_critical: Some(95.0),
+            ..modern_stat(
+                "duty",
+                "DUTY",
+                "%",
+                "dutyCycle",
+                0.0,
+                100.0,
+                0,
+                LT_ACCENT_TEAL,
+                0.755,
+                0.31,
+                0.1125,
+                0.15,
+                0,
+            )
+        },
+    );
+    push(
+        &mut dash,
+        GaugeConfig {
+            low_warning: Some(12.0),
+            low_critical: Some(11.5),
+            high_warning: Some(15.0),
+            ..modern_stat(
+                "battery",
+                "BATT",
+                "V",
+                "battery",
+                8.0,
+                16.0,
+                1,
+                LT_ACCENT_AMBER,
+                0.8775,
+                0.31,
+                0.1125,
+                0.15,
+                0,
+            )
+        },
+    );
+
+    // ---- Live multi-channel trend (RPM / MAP / AFR). ----
+    dash.gauge_cluster.components.push(log_multi_trend(
+        "trend",
+        "Live trend",
+        LogSeriesEntry {
+            channel: "rpm",
+            label: "RPM",
+            color: "#4aa8f5",
+            min: 0.0,
+            max: 8000.0,
+        },
+        &[
+            LogSeriesEntry {
+                channel: "map",
+                label: "MAP",
+                color: "#33d0ba",
+                min: 0.0,
+                max: 110.0,
+            },
+            LogSeriesEntry {
+                channel: "afr",
+                label: "AFR",
+                color: "#4ad884",
+                min: 10.0,
+                max: 20.0,
+            },
+        ],
+        0.02,
+        0.485,
+        0.96,
+        0.30,
+    ));
+
+    dash
+}
+
 /// Dense live telemetry dashboard — Grafana / ops-console inspired layout
 /// showing dozens of channels at once: compact stat tiles, multi-series trend
 /// overlays, and a wall of scrolling sparkline charts (like viewing a log live).

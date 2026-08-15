@@ -268,14 +268,23 @@ export default function TsDashboard({ initialDashPath, isConnected = false }: Ts
           }
         } catch { /* ignore — fall through to defaults */ }
 
-        // 2. Prefer Telemetry Live.ltdash.xml as the default dashboard
+        // 2. Prefer Road Test.ltdash.xml: large, legible primary cards meant to
+        // be read at a glance while driving. Telemetry Live is the dense
+        // diagnostic wall — better at the bench than at the wheel.
+        const roadTestDash = dashes.find(d => d.name === 'Road Test.ltdash.xml');
+        if (roadTestDash) {
+          setSelectedPath(roadTestDash.path);
+          return;
+        }
+
+        // 3. Otherwise Telemetry Live.ltdash.xml
         const telemetryDash = dashes.find(d => d.name === 'Telemetry Live.ltdash.xml');
         if (telemetryDash) {
           setSelectedPath(telemetryDash.path);
           return;
         }
 
-        // 3. Fall back to Basic.ltdash.xml if Telemetry Live isn't present
+        // 4. Fall back to Basic.ltdash.xml if neither is present
         const basicDash = dashes.find(d => d.name === 'Basic.ltdash.xml');
         if (basicDash) {
           setSelectedPath(basicDash.path);

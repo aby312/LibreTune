@@ -2,7 +2,8 @@
 
 use crate::paths::get_dashboards_dir;
 use libretune_core::dash::{
-    self, create_basic_dashboard, create_telemetry_live_dashboard, create_tuning_dashboard,
+    self, create_basic_dashboard, create_road_test_dashboard, create_telemetry_live_dashboard,
+    create_tuning_dashboard,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -290,6 +291,7 @@ fn default_dashboard_specs() -> Vec<(&'static str, DefaultDashBuilder)> {
     vec![
         ("Basic.ltdash.xml", create_basic_dashboard),
         ("Tuning.ltdash.xml", create_tuning_dashboard),
+        ("Road Test.ltdash.xml", create_road_test_dashboard),
         ("Telemetry Live.ltdash.xml", create_telemetry_live_dashboard),
     ]
 }

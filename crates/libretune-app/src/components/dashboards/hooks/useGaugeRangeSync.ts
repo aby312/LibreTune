@@ -58,10 +58,17 @@ export function useGaugeRangeSync(
         const rangeOk =
           Number.isFinite(info.lo) && Number.isFinite(info.hi) && info.hi > info.lo;
 
+        // Keep the dashboard's own label. The INI's title is the verbose
+        // dialog name — "Engine Speed", "Air:Fuel Ratio", "Advance (Current)" —
+        // and overwriting a gauge that deliberately says "RPM", "AFR" or
+        // "TIMING" with it blows the label past the edge of its card. Only
+        // fall back to the INI when the gauge has no title of its own.
+        const gaugeTitle = (gauge.title || '').trim();
+
         return {
           Gauge: {
             ...gauge,
-            title: info.title || gauge.title,
+            title: gaugeTitle || info.title || gauge.title,
             min: rangeOk ? info.lo : gauge.min,
             max: rangeOk ? info.hi : gauge.max,
             units: info.units,
