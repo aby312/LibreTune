@@ -68,6 +68,16 @@ pub fn set_default_symbols<I: IntoIterator<Item = String>>(symbols: I) {
     }
 }
 
+/// Whether a symbol is active for INI parsing, e.g. `CELSIUS`.
+///
+/// The INI selects whole channel definitions on these - Speeduino's coolant is
+/// `coolantRaw - 40` under `#if CELSIUS` and `(coolantRaw - 40) * 1.8 + 32`
+/// otherwise - so anything comparing against a temperature channel has to know
+/// which arm was taken.
+pub fn symbol_is_active(symbol: &str) -> bool {
+    default_symbols().contains(symbol)
+}
+
 fn default_symbols() -> HashSet<String> {
     DEFAULT_SYMBOLS
         .read()

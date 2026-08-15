@@ -28,6 +28,7 @@ pub use output_channels::OutputChannel;
 /// Seed preprocessor symbols (e.g. `CELSIUS`) applied to every parse — see
 /// [`parser::set_default_symbols`].
 pub use parser::set_default_symbols;
+pub use parser::symbol_is_active;
 pub use tables::{CurveDefinition, TableDefinition, TableRole, TableType};
 pub use types::*;
 

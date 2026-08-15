@@ -1164,6 +1164,41 @@ mod tests {
         );
     }
 
+    /// The filter default has to make sense in the units the coolant channel
+    /// actually uses. 160 is a fair Fahrenheit warm-engine threshold, but in
+    /// Celsius it is above boiling, so it rejects every sample a warm engine
+    /// can produce - silently, since a rejected sample looks the same as no
+    /// data. A fully warm NA6 sits at 85-95 C.
+    #[test]
+    fn a_warm_engine_passes_the_coolant_filter_in_celsius() {
+        let mut filters = AutoTuneFilters::default();
+        let mut state = AutoTuneState::new();
+        state.start();
+        let warm = VEDataPoint {
+            rpm: 2000.0,
+            load: 60.0,
+            afr: 14.0,
+            ve: 60.0,
+            clt: 90.0, // fully warm, in Celsius
+            tps: 20.0,
+            tps_rate: 0.0,
+            ..Default::default()
+        };
+
+        assert!(
+            !state.passes_filters(&warm, &filters),
+            "documents the trap: the raw default is a Fahrenheit number"
+        );
+        assert_eq!(
+            AutoTuneState::rejection_reason(&warm, &filters),
+            "clt below min_clt"
+        );
+
+        // What start_autotune now supplies when the INI is Celsius.
+        filters.min_clt = 60.0;
+        assert!(state.passes_filters(&warm, &filters));
+    }
+
     #[test]
     fn configured_delay_extends_buffer_beyond_500ms() {
         // A configured 900 ms delay must size the buffer past the old fixed
