@@ -2611,6 +2611,37 @@ mod tests {
         assert!(conn.signature().is_none());
     }
 
+    /// A dropped link used to leave `state` at `Connected` forever, because
+    /// only connect/disconnect ever moved it. `mark_link_failed` is what the
+    /// polling loop calls so the UI stops claiming a healthy link — and it
+    /// must leave a not-yet-connected connection alone, so a failure during
+    /// connect cannot be reported as a lost link.
+    #[test]
+    fn mark_link_failed_moves_connected_to_error_and_leaves_others_alone() {
+        let mut conn = Connection::new(ConnectionConfig::default());
+        assert_eq!(conn.state(), ConnectionState::Disconnected);
+
+        conn.mark_link_failed();
+        assert_eq!(
+            conn.state(),
+            ConnectionState::Disconnected,
+            "a disconnected link has no link to lose"
+        );
+
+        conn.state = ConnectionState::Connected;
+        conn.mark_link_failed();
+        assert_eq!(conn.state(), ConnectionState::Error);
+
+        // Idempotent: repeated failures while already Error stay Error, so the
+        // recovery loop can call this on every tick without thrashing.
+        conn.mark_link_failed();
+        assert_eq!(conn.state(), ConnectionState::Error);
+
+        // And `connect()` is no longer short-circuited by AlreadyConnected,
+        // which is what lets the recovery loop reopen the port.
+        assert_ne!(conn.state(), ConnectionState::Connected);
+    }
+
     #[test]
     fn write_response_status_ok_on_empty_payload() {
         // Some ECU/INI combos don't echo a status byte on write acks; the CRC
