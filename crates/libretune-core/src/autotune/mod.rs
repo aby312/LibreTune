@@ -1206,9 +1206,17 @@ mod tests {
 
     /// Real measurements, not synthetic: 104 enrichment steps on a Mazda NA6
     /// (1.6 L, Speeduino 2025.01.4), binned by operating point. The model must
-    /// track them. The previous pure-1/flow shape managed a median error of
-    /// 138 ms on this data because it had no cycle term; adding one brought it
-    /// to 46 ms, so 90 ms is a threshold the old model could not have passed.
+    /// track them.
+    ///
+    /// This comment previously claimed the cycle term cut the median error from
+    /// 138 ms to 46 ms, and that 90 ms was a bar the older pure-1/flow shape
+    /// could not clear. That is false, and the numbers were the wrong way
+    /// round. Replaying both shapes over this same data: on these nine points
+    /// the OLD model scores 46.5 ms and the current one 75.2 ms; over all 104
+    /// raw measurements they are 88.8 and 82.7 ms at these anchors, and the
+    /// ordering flips with the anchor pair (at 400/80 it is 107.8 vs 112.4).
+    /// Both shapes clear 90 ms here, so this threshold does not discriminate
+    /// between them - it only catches a model that has come badly adrift.
     #[test]
     fn delay_model_tracks_real_measurements() {
         // (measured_ms, rpm, load kPa, VE)
