@@ -533,6 +533,11 @@ pub async fn start_realtime_stream(
         let mut local_ticks_success: u64 = 0;
         let mut local_ticks_skipped: u64 = 0;
         let mut local_ticks_error: u64 = 0;
+        // Sustained-failure tracking for link recovery (see the recovery block
+        // after the raw-result diagnostics below).
+        let mut consecutive_failures: u32 = 0;
+        let mut link_reported_down = false;
+        let mut last_recovery_attempt: Option<std::time::Instant> = None;
         loop {
             ticker.tick().await;
             tick_count += 1;
@@ -702,6 +707,81 @@ pub async fn start_realtime_stream(
                                 "[ERROR] stream tick #{}: get_realtime_data failed: {}",
                                 count, e
                             );
+                        }
+                    }
+                }
+
+                // Sustained-failure detection and recovery.
+                //
+                // A USB-serial device that drops mid-session fails every write
+                // at the OS layer (`os error 22`) without ever tripping a
+                // timeout path, so this loop polled a dead handle indefinitely
+                // while the connection state still read `Connected`: the UI
+                // showed a live link, and a datalog started in that window
+                // wrote its header and not one row. Observed on a real drive —
+                // 47 minutes of dead stream and three empty recordings, with
+                // no warning anywhere. So: after a sustained run of failures,
+                // say so in the log, drop the connection state so the UI stops
+                // claiming a healthy link, and retry the port periodically
+                // until it comes back. Reopening is safe on a running engine
+                // because the port is opened with DTR deasserted.
+                const LINK_FAILURE_TICKS: u32 = 20;
+                const RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+                match &raw_result {
+                    Ok(_) => {
+                        if link_reported_down {
+                            tracing::info!(
+                                "realtime stream: link recovered after {} consecutive failures",
+                                consecutive_failures
+                            );
+                            let _ = app_handle.emit("realtime:link_restored", ());
+                        }
+                        consecutive_failures = 0;
+                        link_reported_down = false;
+                        last_recovery_attempt = None;
+                    }
+                    Err(e) => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        if consecutive_failures >= LINK_FAILURE_TICKS {
+                            if !link_reported_down {
+                                link_reported_down = true;
+                                tracing::warn!(
+                                    "realtime stream: link down after {} consecutive read \
+                                     failures (last error: {}); marking the connection failed \
+                                     and retrying the port every {}s",
+                                    consecutive_failures,
+                                    e,
+                                    RECOVERY_INTERVAL.as_secs()
+                                );
+                                if let Ok(mut guard) = app_state.connection.try_lock() {
+                                    if let Some(conn) = guard.as_mut() {
+                                        conn.mark_link_failed();
+                                    }
+                                }
+                                let _ = app_handle.emit("realtime:link_lost", e.clone());
+                            }
+                            let due = last_recovery_attempt
+                                .map(|t| t.elapsed() >= RECOVERY_INTERVAL)
+                                .unwrap_or(true);
+                            if due {
+                                last_recovery_attempt = Some(std::time::Instant::now());
+                                if let Ok(mut guard) = app_state.connection.try_lock() {
+                                    set_conn_lock_holder("stream_loop_recovery");
+                                    if let Some(conn) = guard.as_mut() {
+                                        conn.disconnect();
+                                        match conn.connect() {
+                                            Ok(()) => tracing::info!(
+                                                "realtime stream: port reopened successfully"
+                                            ),
+                                            Err(err) => tracing::debug!(
+                                                "realtime stream: port reopen failed: {}",
+                                                err
+                                            ),
+                                        }
+                                    }
+                                    set_conn_lock_holder("(none)");
+                                }
+                            }
                         }
                     }
                 }

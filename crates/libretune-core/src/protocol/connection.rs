@@ -680,6 +680,23 @@ impl Connection {
         }
     }
 
+    /// Record that the link has failed despite being nominally connected.
+    ///
+    /// `state` used to move only in `connect()`/`disconnect()`, so nothing on
+    /// the read/write hot path could ever change it. When a USB-serial device
+    /// dropped mid-session the writes began failing at the OS layer
+    /// (`os error 22`) while `state` stayed `Connected` forever: the UI kept
+    /// reporting a healthy link, and datalog recordings started in that window
+    /// produced a header and not one row, with no warning anywhere. Callers
+    /// that poll the link use this to make sustained failure visible; the
+    /// state then reflects reality and a reconnect can proceed (`connect()`
+    /// refuses to run while the state still claims `Connected`).
+    pub fn mark_link_failed(&mut self) {
+        if self.state == ConnectionState::Connected {
+            self.state = ConnectionState::Error;
+        }
+    }
+
     /// Disconnect from the ECU
     ///
     /// Sets the cancellation flag first so any blocking I/O polling loop running
