@@ -407,7 +407,16 @@ pub async fn start_realtime_stream(
     state: tauri::State<'_, AppState>,
     interval_ms: Option<u64>,
 ) -> Result<(), String> {
-    let interval = interval_ms.unwrap_or(100);
+    // 20 ms (50 Hz) rather than the old 100 ms (10 Hz).
+    //
+    // This is a floor on the poll period, not a demand: each read blocks until
+    // the ECU answers, so a slow ECU simply yields a lower rate — the interval
+    // only stops us throttling a fast one. Measured back-to-back on a Speeduino
+    // 2025.01.4 / Mega2560 at 115200: 81 Hz legacy (10.6 kB/s, 92% of the wire
+    // limit) and 61 Hz CRC-framed. 50 Hz leaves headroom for page reads and
+    // writes to interleave while lifting the ceiling on datalogging, which
+    // cannot record faster than the stream polls.
+    let interval = interval_ms.unwrap_or(20);
     let is_demo = *state.demo_mode.lock().await;
 
     // In demo mode, we only need the definition

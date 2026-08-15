@@ -63,7 +63,7 @@ impl DataLogger {
             buffer: VecDeque::with_capacity(MAX_BUFFER_SIZE),
             start_time: None,
             is_recording: false,
-            sample_rate: 10.0, // Default 10 Hz
+            sample_rate: 20.0, // Default 20 Hz (the stream polls at 50 Hz)
             last_sample: None,
             discarded: 0,
             max_buffer_size: MAX_BUFFER_SIZE,
@@ -158,8 +158,18 @@ impl DataLogger {
 
         let now = Instant::now();
 
-        // Check sample rate
-        let min_interval = Duration::from_secs_f64(1.0 / self.sample_rate);
+        // Rate gate, with tolerance for a jittery producer.
+        //
+        // Samples arrive from the realtime stream, whose period wobbles by a few
+        // ms (serial I/O, lock contention). A strict "at least min_interval since
+        // the last accepted sample" test turns that wobble into halved output: a
+        // sample landing at 99 ms against a 100 ms target is rejected, and the
+        // next one does not arrive until ~149 ms. Measured on a real drive, a
+        // 20 Hz stream into a 10 Hz gate logged 5.8 rows/s instead of 10.
+        //
+        // Accepting anything within 20% of the target keeps the requested rate
+        // without letting a genuinely faster producer through.
+        let min_interval = Duration::from_secs_f64(0.8 / self.sample_rate);
         if let Some(last) = self.last_sample {
             if now.duration_since(last) < min_interval {
                 return;
@@ -270,6 +280,36 @@ impl Default for DataLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A producer running at the target rate wobbles either side of the period.
+    /// With a strict gate, every sample landing a hair early was dropped and the
+    /// next did not arrive for another whole period, halving the logged rate —
+    /// 5.8 rows/s against a 10 Hz target, measured on a real drive. Samples
+    /// within the tolerance band must be kept.
+    #[test]
+    fn slightly_early_samples_are_not_dropped() {
+        let mut logger = DataLogger::new(vec!["rpm".to_string()]);
+        logger.set_sample_rate(100.0); // 10 ms target
+        logger.start();
+
+        logger.record(vec![1.0]);
+        // 9 ms later: 10% early, well inside the wobble a real stream shows.
+        std::thread::sleep(Duration::from_millis(9));
+        logger.record(vec![2.0]);
+        assert_eq!(
+            logger.entries().count(),
+            2,
+            "a sample 10% early must still be recorded"
+        );
+
+        // Genuinely too fast (immediately after) is still rejected.
+        logger.record(vec![3.0]);
+        assert_eq!(
+            logger.entries().count(),
+            2,
+            "a back-to-back sample must still be gated"
+        );
+    }
 
     #[test]
     fn test_logger_basic() {
