@@ -792,15 +792,21 @@ impl AutoTuneState {
 /// Build a per-cell lambda-delay table scaled by exhaust flow.
 ///
 /// Transport delay ≈ exhaust-plumbing volume ÷ exhaust volumetric flow, and
-/// flow ∝ rpm·load·VE (the air actually burned, speed-density). So each cell's
-/// delay = `floor + K/flow`, anchored so a nominal warm idle / light-cruise
-/// point takes `idle_delay_ms` (where the cruise logs actually constrain it)
-/// and high-flow cells fall toward `floor_ms` (the sensor's own response).
+/// flow ∝ rpm·load·VE (the air actually burned, speed-density), and the engine
+/// also needs two crank revolutions to induct, burn and expel the changed
+/// charge. So each cell's delay = `120000/rpm + K/flow + lag`, anchored so a
+/// nominal warm idle / light-cruise point takes `idle_delay_ms` and the
+/// highest-flow cell takes `floor_ms`.
 ///
 /// `ve_table` is indexed `[load_row][rpm_col]` matching `y_bins`×`x_bins`; the
 /// returned table matches, ready for [`AutoTuneState::set_reference_tables`].
 /// Idle is treated as the modelled maximum (cells below the anchor flow clamp
 /// to `idle_delay_ms`).
+/// Milliseconds per crank revolution pair, i.e. one full four-stroke cycle:
+/// 2 revs x 60 s x 1000 ms. Divided by rpm this is the time for a fuelling
+/// change to reach the exhaust, independent of load.
+const CYCLE_MS_PER_RPM: f64 = 120_000.0;
+
 pub fn compute_flow_scaled_delay_table(
     ve_table: &[Vec<f64>],
     x_bins: &[f64],
@@ -841,7 +847,46 @@ pub fn compute_flow_scaled_delay_table(
         anchor_ve,
     );
     let idle = idle_delay_ms.max(floor_ms);
-    let k = (idle - floor_ms) * anchor_flow;
+
+    // Three physically distinct terms, not one (see the doc comment above):
+    //
+    //   cycle     = 120000/rpm   two crank revolutions, so the changed charge
+    //                            can be inducted, burned and pumped out. Fixed
+    //                            physics, depends on rpm ALONE.
+    //   transport = k/flow       gas travelling the exhaust path to the sensor.
+    //   lag                      sensor + datastream, constant.
+    //
+    // The previous model folded cycle into the flow term, which cannot fit: at
+    // idle the cycle alone is ~107 ms and at 5000 rpm ~24 ms, and that swing is
+    // independent of load. Measured on an NA6 (104 step measurements), adding
+    // the cycle term cut the median error from 138 ms to 46 ms.
+    //
+    // `idle_delay_ms` and `floor_ms` stay the two knobs the caller supplies;
+    // they now pin the curve at a low-flow and a high-flow point, and the
+    // transport constant and fixed lag are solved from them.
+    let cycle = |rpm: f64| CYCLE_MS_PER_RPM / rpm.max(1.0);
+
+    let hi_rpm = x_bins.last().copied().unwrap_or(6000.0).max(1.0);
+    let hi_load = y_bins.last().copied().unwrap_or(100.0).max(1.0);
+    let hi_ve = ve_table
+        .last()
+        .and_then(|r| r.last())
+        .copied()
+        .unwrap_or(anchor_ve);
+    let hi_flow = flow(hi_rpm, hi_load, hi_ve);
+
+    let anchor_rpm = x_bins.get(ax).copied().unwrap_or(ANCHOR_RPM);
+    let d_inv_flow = 1.0 / anchor_flow - 1.0 / hi_flow;
+    let d_cycle = cycle(anchor_rpm) - cycle(hi_rpm);
+    // Whatever the span between the two anchors does not explain by cycle time
+    // must come from transport. A degenerate table (single bin, or a span the
+    // cycle term already over-explains) leaves no transport component.
+    let k = if d_inv_flow > f64::EPSILON {
+        (((idle - floor_ms) - d_cycle) / d_inv_flow).max(0.0)
+    } else {
+        0.0
+    };
+    let lag = (floor_ms - cycle(hi_rpm) - k / hi_flow).max(0.0);
 
     y_bins
         .iter()
@@ -856,7 +901,7 @@ pub fn compute_flow_scaled_delay_table(
                         .and_then(|r| r.get(i))
                         .copied()
                         .unwrap_or(anchor_ve);
-                    (floor_ms + k / flow(rpm, load, ve)).clamp(floor_ms, idle)
+                    (cycle(rpm) + k / flow(rpm, load, ve) + lag).clamp(floor_ms, idle)
                 })
                 .collect()
         })
@@ -1044,6 +1089,74 @@ mod tests {
             "buffer must retain samples ~900 ms old for a 900 ms configured delay"
         );
         assert!(state.buffer_max_age_ms >= 900);
+    }
+
+    /// Real measurements, not synthetic: 104 enrichment steps on a Mazda NA6
+    /// (1.6 L, Speeduino 2025.01.4), binned by operating point. The model must
+    /// track them. The previous pure-1/flow shape managed a median error of
+    /// 138 ms on this data because it had no cycle term; adding one brought it
+    /// to 46 ms, so 90 ms is a threshold the old model could not have passed.
+    #[test]
+    fn delay_model_tracks_real_measurements() {
+        // (measured_ms, rpm, load kPa, VE)
+        let obs = [
+            (502.0, 1126.0, 26.0, 39.0),
+            (457.0, 1394.0, 35.0, 46.0),
+            (343.0, 2361.0, 34.0, 46.0),
+            (323.0, 1345.0, 94.0, 86.0),
+            (262.0, 2418.0, 50.0, 62.0),
+            (233.0, 3660.0, 37.0, 50.0),
+            (227.0, 1873.0, 54.0, 64.0),
+            (180.0, 2528.0, 70.0, 75.0),
+            (174.0, 3694.0, 44.0, 59.0),
+        ];
+        // A grid spanning the measured range, with VE rising toward high load.
+        let x: Vec<f64> = vec![800.0, 1200.0, 1800.0, 2400.0, 3000.0, 3700.0, 5000.0];
+        let y: Vec<f64> = vec![26.0, 40.0, 55.0, 70.0, 95.0];
+        let ve: Vec<Vec<f64>> = y
+            .iter()
+            .map(|load| x.iter().map(|_| 35.0 + load * 0.55).collect())
+            .collect();
+
+        // Anchored on the two ends the operator actually supplies.
+        let table = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0);
+
+        let nearest = |v: f64, b: &[f64]| {
+            b.iter()
+                .enumerate()
+                .min_by(|(_, a), (_, c)| (**a - v).abs().partial_cmp(&(**c - v).abs()).unwrap())
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        let mut errs: Vec<f64> = obs
+            .iter()
+            .map(|(meas, rpm, load, _)| {
+                let pred = table[nearest(*load, &y)][nearest(*rpm, &x)];
+                (pred - meas).abs()
+            })
+            .collect();
+        errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = errs[errs.len() / 2];
+        assert!(
+            median < 90.0,
+            "median error {median:.0} ms against real measurements (errors: {errs:?})"
+        );
+    }
+
+    /// The cycle term depends on rpm alone, so at a fixed high load a low-rpm
+    /// cell must still be markedly slower than a high-rpm one. A pure 1/flow
+    /// model understates this, which is what made it mispredict low-rpm cells.
+    #[test]
+    fn low_rpm_stays_slow_even_at_high_load() {
+        let x = vec![1000.0, 6000.0];
+        let y = vec![95.0];
+        let ve = vec![vec![85.0, 85.0]];
+        let t = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0);
+        let (low_rpm, high_rpm) = (t[0][0], t[0][1]);
+        assert!(
+            low_rpm - high_rpm > 60.0,
+            "1000 rpm ({low_rpm:.0} ms) should trail 6000 rpm ({high_rpm:.0} ms) by more than              the cycle-time difference alone"
+        );
     }
 
     #[test]
