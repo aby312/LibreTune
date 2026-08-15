@@ -696,7 +696,50 @@ impl Connection {
     }
 
     /// Perform handshake and get ECU signature
+    /// Full handshake with a one-shot DTR escalation.
+    ///
+    /// `configure_port` opens with DTR deasserted so a Mega's
+    /// capacitor-coupled auto-reset is never tripped (that reset stalled a
+    /// running engine). But some targets gate ALL serial traffic on the host
+    /// asserting DTR: the UNO R4 WiFi's ESP32 USB bridge does (the bench
+    /// sim — verified: mute with DTR low, instant with it high, and raising
+    /// DTR does NOT reset that board), and some native-CDC Speeduino builds
+    /// (Teensy/STM32 cores) behave the same. TunerStudio talks to both kinds.
+    ///
+    /// The ladder resolves the conflict: a Mega answers the legacy query
+    /// without DTR, so it never reaches the escalation rung. Only an
+    /// ALL-silent link (CRC both byte orders + legacy, zero bytes back) does
+    /// — where the worst case of asserting DTR is resetting a device we
+    /// could not talk to anyway.
     fn handshake(&mut self) -> Result<String, ProtocolError> {
+        let first_err = match self.handshake_attempt() {
+            Ok(sig) => return Ok(sig),
+            Err(e) => e,
+        };
+        // Escalate only on total silence; any other failure mode means
+        // something answered and DTR is not the problem.
+        if !matches!(first_err, ProtocolError::Timeout) {
+            return Err(first_err);
+        }
+        match self.channel.as_mut().map(|c| c.set_dtr(true)) {
+            Some(Ok(true)) => {
+                tracing::debug!(
+                    "handshake: all attempts silent with DTR deasserted; \
+                     asserting DTR and retrying once (native-CDC bridge quirk)"
+                );
+                // If the device did reset on the DTR edge after all, give its
+                // bootloader window time to pass before retrying.
+                std::thread::sleep(Duration::from_millis(1800));
+                if let Some(channel) = self.channel.as_mut() {
+                    let _ = channel.clear_input_buffer();
+                }
+                self.handshake_attempt().map_err(|_| first_err)
+            }
+            _ => Err(first_err),
+        }
+    }
+
+    fn handshake_attempt(&mut self) -> Result<String, ProtocolError> {
         // Get query command from protocol settings or use default
         // rusEFI uses 'S' (Signature), Speeduino/MegaSquirt uses 'Q' (Query)
         let query_cmd = self

@@ -19,6 +19,13 @@ pub trait CommunicationChannel: Read + Write + Send {
 
     /// Get number of bytes available to read
     fn bytes_to_read(&mut self) -> io::Result<u32>;
+
+    /// Set the DTR line, when the channel has one. Returns Ok(true) when the
+    /// level was applied, Ok(false) when the channel has no DTR concept (TCP).
+    fn set_dtr(&mut self, level: bool) -> io::Result<bool> {
+        let _ = level;
+        Ok(false)
+    }
 }
 
 /// Serial port wrapper implementing CommunicationChannel
@@ -72,6 +79,13 @@ impl CommunicationChannel for SerialChannel {
 
     fn bytes_to_read(&mut self) -> io::Result<u32> {
         self.port.bytes_to_read().map_err(io::Error::other)
+    }
+
+    fn set_dtr(&mut self, level: bool) -> io::Result<bool> {
+        self.port
+            .write_data_terminal_ready(level)
+            .map(|_| true)
+            .map_err(io::Error::other)
     }
 }
 
