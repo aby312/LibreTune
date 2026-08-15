@@ -1018,7 +1018,19 @@ fn parse_constants_entry(
             def.protocol.block_read_timeout = clean.parse().unwrap_or(1000);
             return;
         }
-        "writeblocks" => {
+        // Speeduino's INI declares this inside [Constants], but only the
+        // [MegaTune]/[TunerStudio] parsers had an arm for it, so the value fell
+        // through to the generic constant parser and `delay_after_port_open`
+        // silently kept its 0 default. The handshake then raced the port open by
+        // ~24 ms instead of waiting the declared 1000 ms.
+        "delayafterportopen" => {
+            let clean = value.split(';').next().unwrap_or("").trim();
+            def.protocol.delay_after_port_open = clean.parse().unwrap_or(0);
+            return;
+        }
+        // Same section-scope gap, plus the key here is `tsWriteBlocks`; the
+        // existing arm only matched the bare `writeBlocks` spelling.
+        "writeblocks" | "tswriteblocks" => {
             def.protocol.write_blocks =
                 value.to_lowercase() == "on" || value == "1" || value.to_lowercase() == "true";
             return;
@@ -3186,6 +3198,33 @@ fn parse_constants_extensions_entry(def: &mut EcuDefinition, key: &str, value: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Speeduino declares these in `[Constants]`, where the section parser had
+    /// no arm for either — `delayAfterPortOpen` stayed 0 (handshake raced the
+    /// port open) and `tsWriteBlocks` was never matched at all because only the
+    /// bare `writeBlocks` spelling was handled.
+    #[test]
+    fn constants_section_parses_port_open_delay_and_ts_write_blocks() {
+        let mut def = EcuDefinition::default();
+        let (mut page, mut offset) = (0u8, 0u16);
+
+        assert_eq!(def.protocol.delay_after_port_open, 0, "default is 0");
+        parse_constants_entry(
+            &mut def,
+            "delayAfterPortOpen",
+            "1000 ; let the board settle",
+            &mut page,
+            &mut offset,
+        );
+        assert_eq!(def.protocol.delay_after_port_open, 1000);
+
+        def.protocol.write_blocks = false;
+        parse_constants_entry(&mut def, "tsWriteBlocks", "on", &mut page, &mut offset);
+        assert!(
+            def.protocol.write_blocks,
+            "tsWriteBlocks spelling must match"
+        );
+    }
 
     #[test]
     fn test_strip_comment() {
