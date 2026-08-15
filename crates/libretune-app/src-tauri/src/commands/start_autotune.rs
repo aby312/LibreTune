@@ -152,6 +152,30 @@ pub async fn start_autotune(
     // synthesise one from the VE table. Transport delay ≈ exhaust volume /
     // flow, and flow ∝ rpm·load·VE, so the delay is long at idle and short at
     // high load. lambda_delay_ms anchors the low-flow end.
+    // Crank revolutions per engine cycle, straight from the tune rather than
+    // assumed: the INI declares `twoStroke` (and derives `strokeMultipler` from
+    // it as `twoStroke == 1 ? 1 : 2`). A two-stroke or rotary reaches the
+    // exhaust in one revolution, not two, which halves the rpm-dependent part
+    // of the transport delay.
+    let revs_per_cycle = def
+        .constants
+        .get("twoStroke")
+        .map(|c| {
+            let v = crate::commands::constant_values::read_constant_from_cache_or_tune(
+                "twoStroke",
+                c,
+                def.endianness,
+                None,
+                cache,
+            );
+            if v >= 0.5 {
+                1.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap_or(2.0);
+
     if settings.lambda_delay_flow_scaled && reference_tables.lambda_delay_table.is_empty() {
         if let Some(table) = def.get_table_by_name_or_map(&table_name) {
             if let Some(ve_z) =
@@ -164,6 +188,7 @@ pub async fn start_autotune(
                         &y_bins,
                         settings.lambda_delay_ms,
                         settings.lambda_delay_floor_ms,
+                        revs_per_cycle,
                     );
             }
         }

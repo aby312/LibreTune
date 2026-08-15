@@ -803,29 +803,23 @@ impl AutoTuneState {
 /// returned table matches, ready for [`AutoTuneState::set_reference_tables`].
 /// Idle is treated as the modelled maximum (cells below the anchor flow clamp
 /// to `idle_delay_ms`).
-/// Crank revolutions per engine cycle. **Assumes four-stroke.**
+/// Milliseconds per crank revolution, at 1 rpm. Multiplied by the engine's
+/// revolutions per cycle and divided by rpm, this gives the time a fuelling
+/// change takes to reach the exhaust, independent of load.
+const MS_PER_REV_AT_1_RPM: f64 = 60_000.0;
+
 ///
-/// A two-stroke or rotary completes a cycle every revolution, so its cycle
-/// delay is half this, and the model will overstate the rpm-dependent term for
-/// those engines. Nothing currently plumbs the engine's stroke type this far
-/// (`basemap::engine_spec::StrokeType` knows about it, but is a separate
-/// subsystem and is not consulted here), and the practical impact is limited:
-/// the caller supplies the two anchor points, so the curve still passes
-/// through them and the error is confined to the shape between. Fixing it
-/// properly means carrying stroke type into the autotune session.
-const REVS_PER_CYCLE: f64 = 2.0;
-
-/// Milliseconds of cycle time per rpm: revolutions per cycle x 60 s x 1000 ms.
-/// Divided by rpm this is how long a fuelling change takes to reach the
-/// exhaust, independent of load.
-const CYCLE_MS_PER_RPM: f64 = 60_000.0 * REVS_PER_CYCLE;
-
+/// `revs_per_cycle` is the engine's crank revolutions per full cycle: 2 for a
+/// four-stroke, 1 for a two-stroke or rotary. The INI declares this (Speeduino
+/// exposes it as `twoStroke`, and computes `strokeMultipler` from it), so it is
+/// passed in rather than assumed.
 pub fn compute_flow_scaled_delay_table(
     ve_table: &[Vec<f64>],
     x_bins: &[f64],
     y_bins: &[f64],
     idle_delay_ms: f64,
     floor_ms: f64,
+    revs_per_cycle: f64,
 ) -> Vec<Vec<f64>> {
     // Warm-idle / light-cruise anchor: where cruise logs give the delay a real
     // measurement. The value only sets which cell equals idle_delay_ms; the
@@ -877,7 +871,8 @@ pub fn compute_flow_scaled_delay_table(
     // `idle_delay_ms` and `floor_ms` stay the two knobs the caller supplies;
     // they now pin the curve at a low-flow and a high-flow point, and the
     // transport constant and fixed lag are solved from them.
-    let cycle = |rpm: f64| CYCLE_MS_PER_RPM / rpm.max(1.0);
+    let cycle_ms_per_rpm = MS_PER_REV_AT_1_RPM * revs_per_cycle.max(1.0);
+    let cycle = |rpm: f64| cycle_ms_per_rpm / rpm.max(1.0);
 
     let hi_rpm = x_bins.last().copied().unwrap_or(6000.0).max(1.0);
     let hi_load = y_bins.last().copied().unwrap_or(100.0).max(1.0);
@@ -1132,7 +1127,7 @@ mod tests {
             .collect();
 
         // Anchored on the two ends the operator actually supplies.
-        let table = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0);
+        let table = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0, 2.0);
 
         let nearest = |v: f64, b: &[f64]| {
             b.iter()
@@ -1159,12 +1154,59 @@ mod tests {
     /// The cycle term depends on rpm alone, so at a fixed high load a low-rpm
     /// cell must still be markedly slower than a high-rpm one. A pure 1/flow
     /// model understates this, which is what made it mispredict low-rpm cells.
+    /// A two-stroke reaches the exhaust in one revolution, not two, so its
+    /// cycle term is half a four-stroke's. The INI declares this (`twoStroke`,
+    /// and `strokeMultipler = twoStroke == 1 ? 1 : 2`), so it is supplied
+    /// rather than assumed.
+    ///
+    /// Note the caller's two anchors absorb most of the difference — both
+    /// curves pass through them — so the effect is a redistribution between
+    /// the cycle and transport terms rather than a wholesale shift. It shows
+    /// up where the cycle term dominates AND the cell is far from the anchor:
+    /// low rpm at high load, worth up to ~50 ms on a representative grid.
+    #[test]
+    fn two_stroke_redistributes_delay_away_from_the_cycle_term() {
+        let x = vec![800.0, 1500.0, 3000.0, 6000.0];
+        let y = vec![40.0, 70.0, 95.0];
+        let ve = vec![
+            vec![45.0, 55.0, 60.0, 58.0],
+            vec![60.0, 70.0, 78.0, 75.0],
+            vec![70.0, 82.0, 88.0, 85.0],
+        ];
+
+        let four = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0, 2.0);
+        let two = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0, 1.0);
+
+        // Low rpm, high load: cycle-dominated and far from the anchor.
+        let (f, t) = (four[2][0], two[2][0]);
+        assert!(
+            f - t > 25.0,
+            "800 rpm at 95 kPa: four-stroke {f:.0} ms should exceed two-stroke {t:.0} ms"
+        );
+
+        // The anchor cell itself is pinned for both — this is why the stroke
+        // type cannot simply shift the whole curve.
+        assert!(
+            (four[0][0] - two[0][0]).abs() < 1.0,
+            "the supplied anchor must hold regardless of stroke type"
+        );
+
+        // Neither curve may leave the range the caller asked for.
+        for table in [&four, &two] {
+            for row in table.iter() {
+                for v in row.iter() {
+                    assert!((100.0..=500.0).contains(v), "delay {v} outside the anchors");
+                }
+            }
+        }
+    }
+
     #[test]
     fn low_rpm_stays_slow_even_at_high_load() {
         let x = vec![1000.0, 6000.0];
         let y = vec![95.0];
         let ve = vec![vec![85.0, 85.0]];
-        let t = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0);
+        let t = compute_flow_scaled_delay_table(&ve, &x, &y, 500.0, 100.0, 2.0);
         let (low_rpm, high_rpm) = (t[0][0], t[0][1]);
         assert!(
             low_rpm - high_rpm > 60.0,
@@ -1181,7 +1223,7 @@ mod tests {
         let ve = vec![vec![50.0; 3]; 3];
         let idle = 1050.0;
         let floor = 120.0;
-        let t = compute_flow_scaled_delay_table(&ve, &x, &y, idle, floor);
+        let t = compute_flow_scaled_delay_table(&ve, &x, &y, idle, floor, 2.0);
 
         // Low-flow corner (anchor rpm=800, load=40) is the longest.
         assert!(
