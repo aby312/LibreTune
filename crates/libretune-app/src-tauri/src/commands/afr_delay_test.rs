@@ -22,6 +22,9 @@
 //! - **RAM only, never burned.** The step is written to the ECU's live memory,
 //!   so it is not persisted. Cycling the key restores the stored tune even if
 //!   this process dies mid-step.
+//! - **One byte.** The lever is the warmup curve's warm-plateau slot
+//!   (`wueRates[9]`, normally 100%): a single-byte write steps fuelling
+//!   engine-wide, and a single byte restores it. See [`WUE_CONSTANT`].
 //! - **Restore on every path.** The original value is written back after each
 //!   step, on abort, and on error. The restore is attempted even when the run
 //!   is failing, and a failure to restore is escalated loudly.
@@ -54,17 +57,31 @@ const MIN_STEP_PERCENT: f64 = 3.0;
 const MIN_HOLD_MS: u64 = 500;
 const MAX_HOLD_MS: u64 = 5_000;
 
-/// Constant used as the fuel multiplier. `reqFuel` scales every injector pulse
-/// equally, so the step is independent of position in the VE table — unlike
-/// editing a table cell, where interpolation between cells would blur it.
-const FUEL_CONSTANT: &str = "reqFuel";
+/// The fuel lever: the LAST slot of the warmup-enrichment curve.
+///
+/// On a warm engine the firmware's `correctionWUE()` returns this slot's raw
+/// value every fuel calculation — cache-free, multiplied straight into pulse
+/// width engine-wide (corrections.cpp @ 202501). The INI mandates the slot be
+/// 100 (= 100%, no enrichment) on a healthy tune, so stepping it to 108 is an
+/// instant +8% everywhere with a ONE-BYTE write, and restoring is one byte
+/// back. Earlier levers failed: `reqFuel` is in requiresPowerCycle (live
+/// writes ignored by a running engine — measured), and whole-VE-table
+/// stepping needs 256 writes each way with the edge smeared across ~2.5 s of
+/// serial. As a bonus the ECU broadcasts the multiplier it is actually
+/// applying (`warmupEnrich` output channel), giving a ground-truth anchor for
+/// the moment the step took effect.
+const WUE_CONSTANT: &str = "wueRates";
+/// Index of the warm-plateau slot within the WUE curve.
+const WUE_LAST_SLOT: usize = 9;
+/// Realtime channel reporting the WUE multiplier the ECU is applying now.
+const WUE_CHANNEL: &str = "warmupEnrich";
 
 /// Progress event emitted to the frontend during a delay-test run (as
 /// `afr_delay_test:progress`). `phase` is a coarse stage label —
 /// "starting", "enriching", "settling", then "complete" or "aborted".
-/// `applied_value` and `baseline_value` are the current and restore
-/// fuel-constant values so the UI can show exactly what is written and
-/// confirm the restore.
+/// `applied_value` and `baseline_value` are the applied and restore
+/// WUE-slot values (percent) so the UI can show exactly what is written
+/// and confirm the restore.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DelayTestProgress {
@@ -167,6 +184,9 @@ struct SampleChannels {
     afr: String,
     rpm: Option<String>,
     load: Option<String>,
+    /// The ECU-reported WUE multiplier — used to gate on the warm plateau and
+    /// to anchor t0 at the moment the ECU actually applied the step.
+    wue: Option<String>,
 }
 
 fn resolve_sample_channels(
@@ -195,7 +215,61 @@ fn resolve_sample_channels(
         rpm: find_exact("rpm"),
         // MAP in kPa preferred as the load axis; TPS is the fallback.
         load: find_exact("map").or_else(|| find_exact("tps")),
+        wue: find_exact(WUE_CHANNEL),
     })
+}
+
+/// Read or write the single byte of `wueRates[WUE_LAST_SLOT]`, with the same
+/// cache/tune bookkeeping as the table-cell writer. One count=1 frame on the
+/// wire — the write form proven to reach a running engine.
+async fn wue_slot(state: &AppState, write: Option<u8>) -> Result<u8, String> {
+    let (page, offset) = {
+        let def_guard = state.definition.lock().await;
+        let def = def_guard.as_ref().ok_or("Definition not loaded")?;
+        let c = def
+            .constants
+            .get(WUE_CONSTANT)
+            .ok_or_else(|| format!("{WUE_CONSTANT} not found in this INI"))?;
+        let elem = c.data_type.size_bytes().max(1);
+        (c.page, c.offset + (WUE_LAST_SLOT * elem) as u16)
+    };
+
+    let mut conn_guard = state.connection.lock().await;
+    let mut cache_guard = state.tune_cache.lock().await;
+
+    let current = cache_guard
+        .as_ref()
+        .and_then(|c| c.read_bytes(page, offset, 1).map(|b| b[0]))
+        .ok_or("WUE curve not in the tune cache — sync the ECU first")?;
+
+    let Some(value) = write else {
+        return Ok(current);
+    };
+
+    if let Some(cache) = cache_guard.as_mut() {
+        cache.write_bytes(page, offset, &[value]);
+    }
+    let mut tune_guard = state.current_tune.lock().await;
+    if let Some(tune) = tune_guard.as_mut() {
+        if let Some(page_data) = tune.pages.get_mut(&page) {
+            if (offset as usize) < page_data.len() {
+                page_data[offset as usize] = value;
+            }
+        }
+    }
+    if let Some(conn) = conn_guard.as_mut() {
+        let params = libretune_core::protocol::commands::WriteMemoryParams {
+            can_id: 0,
+            page,
+            offset,
+            data: vec![value],
+        };
+        conn.write_memory(params)
+            .map_err(|e| format!("ECU write failed: {e}"))?;
+    } else {
+        return Err("Not connected to the ECU".to_string());
+    }
+    Ok(current)
 }
 
 /// Sample AFR (and remember the latest rpm/load) for `total_ms`, checking the
@@ -213,6 +287,10 @@ async fn sample_window(
     total_ms: u64,
     out: &mut Vec<AfrSample>,
     last_point: &mut (Option<f64>, Option<f64>),
+    // When set: (threshold, slot for first crossing time). The ECU's reported
+    // WUE multiplier crossing the threshold marks the instant the step was
+    // actually applied — a ground-truth t0 immune to serial/write latency.
+    mut wue_edge: Option<(f64, &mut Option<u64>)>,
 ) -> bool {
     const TICK_MS: u64 = 30;
     let end = epoch.elapsed().as_millis() as u64 + total_ms;
@@ -239,6 +317,17 @@ async fn sample_window(
                 if let Some(load_key) = &ch.load {
                     if let Some(v) = snap.get(load_key) {
                         last_point.1 = Some(*v);
+                    }
+                }
+                if let Some((threshold, slot)) = wue_edge.as_mut() {
+                    if slot.is_none() {
+                        if let Some(wue_key) = &ch.wue {
+                            if let Some(v) = snap.get(wue_key) {
+                                if *v >= *threshold {
+                                    **slot = Some(t_ms);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -274,30 +363,29 @@ pub async fn run_afr_delay_test(
     let settle_ms = settle_ms.clamp(MIN_HOLD_MS, MAX_HOLD_MS * 2);
     let repeats = repeats.clamp(1, 20);
 
-    // Read the baseline through the same path the UI uses, so the restore
-    // target is what the engine is actually running rather than an assumption.
+    // Baseline = the tune's warm-plateau WUE value (the INI mandates 100).
     // Reading it up front also fails the run early if the ECU is unreachable,
     // instead of discovering that after a step has already been applied.
-    let baseline = crate::commands::constants_read::get_constant_value(
-        state.clone(),
-        FUEL_CONSTANT.to_string(),
-    )
-    .await
-    .map_err(|e| format!("Could not read {FUEL_CONSTANT} ({e}). Connect and load a tune first."))?;
+    let baseline = wue_slot(&state, None)
+        .await
+        .map_err(|e| format!("Could not read {WUE_CONSTANT}[{WUE_LAST_SLOT}] ({e})."))?;
 
-    if baseline <= 0.0 {
+    if baseline == 0 {
         return Err(format!(
-            "{FUEL_CONSTANT} reads {baseline}, which is not a usable baseline"
+            "{WUE_CONSTANT}[{WUE_LAST_SLOT}] reads 0, which is not a usable baseline"
         ));
     }
 
-    let enriched = (baseline * (1.0 + step_percent / 100.0) * 10.0).round() / 10.0;
-    if enriched <= baseline {
+    let enriched_u8 = ((baseline as f64) * (1.0 + step_percent / 100.0)).round() as u16;
+    let enriched_u8 = enriched_u8.min(255) as u8;
+    if enriched_u8 <= baseline {
         return Err(format!(
             "A {step_percent:.1}% step on {baseline} does not change the value at this \
              resolution. Use a larger step."
         ));
     }
+    let baseline = baseline as f64;
+    let enriched = enriched_u8 as f64;
 
     abort_flag().store(false, Ordering::SeqCst);
 
@@ -314,6 +402,27 @@ pub async fn run_afr_delay_test(
         .as_ref()
         .and_then(resolve_sample_channels);
 
+    // Warm-plateau gate: the lever maps 1:1 onto fuelling only when the ECU
+    // is already applying the last WUE slot. The ECU reports what it applies
+    // via the warmupEnrich channel — a higher reading means the engine is
+    // still on the warmup ramp and any measurement would be scaled and mushy.
+    if let Some(ch) = channels.as_ref() {
+        if let Some(wue_key) = &ch.wue {
+            if let Ok(snap) = crate::commands::realtime_get::get_realtime_data(state.clone()).await
+            {
+                if let Some(applied) = snap.get(wue_key) {
+                    if (applied - baseline).abs() > 2.0 {
+                        return Err(format!(
+                            "Engine is still in warmup: the ECU is applying {applied:.0}% \
+                             warmup enrichment vs the warm-plateau value {baseline:.0}. \
+                             Warm it up, then run the test."
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     emit(
         &app,
         DelayTestProgress::plain(
@@ -323,8 +432,8 @@ pub async fn run_afr_delay_test(
             enriched,
             baseline,
             format!(
-                "{FUEL_CONSTANT} {baseline:.1} -> {enriched:.1} ({step_percent:.1}% richer), \
-                 {repeats} steps, {hold_ms} ms hold. RAM only, never burned."
+                "WUE step {baseline:.0}% -> {enriched:.0}% ({step_percent:.1}% richer), \
+                 {repeats} steps, {hold_ms} ms hold. One byte, RAM only, never burned."
             ),
         ),
     );
@@ -332,12 +441,7 @@ pub async fn run_afr_delay_test(
     // Anything that leaves this function must first put `baseline` back. The
     // helper is used on the happy path, on abort, and on error.
     async fn restore(state: &tauri::State<'_, AppState>, baseline: f64) -> Result<(), String> {
-        crate::commands::constant_update::update_constant(
-            state.clone(),
-            FUEL_CONSTANT.to_string(),
-            baseline,
-        )
-        .await
+        wue_slot(state, Some(baseline as u8)).await.map(|_| ())
     }
 
     /// Baseline window sampled immediately before each enrichment write.
@@ -377,34 +481,34 @@ pub async fn run_afr_delay_test(
             PRE_ROLL_MS,
             &mut pre,
             &mut point,
+            None,
         )
         .await
         {
             break;
         }
 
-        if let Err(e) = crate::commands::constant_update::update_constant(
-            state.clone(),
-            FUEL_CONSTANT.to_string(),
-            enriched,
-        )
-        .await
-        {
+        if let Err(e) = wue_slot(&state, Some(enriched as u8)).await {
             // The write failed, so the ECU may or may not have taken it.
             // Restore regardless and stop.
             let restore_err = restore(&state, baseline).await.err();
             return Err(match restore_err {
                 None => format!("Step {step} failed to apply ({e}). Baseline restored."),
                 Some(r) => format!(
-                    "Step {step} failed to apply ({e}) AND restoring {FUEL_CONSTANT} to \
+                    "Step {step} failed to apply ({e}) AND restoring the WUE slot to \
                      {baseline} also failed ({r}). CYCLE THE KEY to reload the stored tune."
                 ),
             });
         }
 
-        // The anchor is the instant the enriched value finished writing; the
-        // measured delay is wire->combustion->transport->sensor from here.
-        let anchor_ms = epoch.elapsed().as_millis() as u64;
+        // Fallback anchor: the instant the write finished. Preferred anchor:
+        // the ECU's own warmupEnrich channel crossing toward the stepped
+        // value, captured during the hold sampling — the moment the ECU
+        // actually started applying the step, immune to serial and
+        // scheduling latency.
+        let write_anchor_ms = epoch.elapsed().as_millis() as u64;
+        let mut ecu_anchor_ms: Option<u64> = None;
+        let wue_threshold = (baseline + enriched) / 2.0;
 
         // Abort-aware hold, sampling AFR throughout: an abort mid-hold falls
         // straight through to the restore below, so the enrichment is cut
@@ -417,12 +521,14 @@ pub async fn run_afr_delay_test(
             hold_ms,
             &mut post,
             &mut point,
+            Some((wue_threshold, &mut ecu_anchor_ms)),
         )
         .await;
+        let anchor_ms = ecu_anchor_ms.unwrap_or(write_anchor_ms);
 
         if let Err(e) = restore(&state, baseline).await {
             return Err(format!(
-                "Applied step {step} but could not restore {FUEL_CONSTANT} to {baseline} ({e}). \
+                "Applied step {step} but could not restore the WUE slot to {baseline} ({e}). \
                  The engine is running RICH. CYCLE THE KEY to reload the stored tune."
             ));
         }
@@ -489,14 +595,14 @@ pub async fn run_afr_delay_test(
     // broken by an abort between the enrich and the restore.
     restore(&state, baseline).await.map_err(|e| {
         format!(
-            "Test finished but the final restore of {FUEL_CONSTANT} to {baseline} failed ({e}). \
+            "Test finished but the final restore of the WUE slot to {baseline} failed ({e}). \
              CYCLE THE KEY to reload the stored tune."
         )
     })?;
 
     let aborted = abort_flag().load(Ordering::SeqCst);
     let summary = format!(
-        "{} after {completed}/{repeats} steps. {FUEL_CONSTANT} restored to {baseline:.1}. \
+        "{} after {completed}/{repeats} steps. WUE slot restored to {baseline:.0}%. \
          Nothing was burned.",
         if aborted { "Aborted" } else { "Completed" }
     );

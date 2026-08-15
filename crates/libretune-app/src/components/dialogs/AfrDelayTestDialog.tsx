@@ -128,9 +128,9 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
         <h2>AFR Delay Test</h2>
 
         <p className="afr-delay-intro">
-          Applies a timed enrichment step so the delay between a fuelling change and
-          the wideband seeing it can be measured from the log. Repeat at several
-          rpm and load points to build a delay map.
+          Applies a timed enrichment step and measures, live, how long the wideband
+          takes to see it. Each successful step adds to the rpm × load delay map
+          below. Run it warm, at several steady rpm and load points.
         </p>
 
         <div className="afr-delay-safety">
@@ -140,7 +140,7 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
             <ul>
               <li>The step can only make the mixture richer, never leaner.</li>
               <li>Written to live memory — cycling the key restores the stored tune.</li>
-              <li><code>reqFuel</code> is restored after every step and on abort.</li>
+              <li>One byte (the warm-plateau WUE slot) is stepped and restored after every step and on abort.</li>
               <li>Hold the engine steady yourself; this does not touch throttle.</li>
             </ul>
           </div>
@@ -193,8 +193,8 @@ export const AfrDelayTestDialog: React.FC<Props> = ({ isOpen, onClose }) => {
             </div>
             {progress.baselineValue > 0 && (
               <div className="afr-delay-values">
-                reqFuel baseline {progress.baselineValue.toFixed(1)} ms
-                {progress.phase === 'enriching' && ` -> applying ${progress.appliedValue.toFixed(1)} ms`}
+                WUE baseline {progress.baselineValue.toFixed(0)}%
+                {progress.phase === 'enriching' && ` -> applying ${progress.appliedValue.toFixed(0)}%`}
               </div>
             )}
             {progress.measuredDelayMs !== undefined && (
