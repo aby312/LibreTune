@@ -1616,8 +1616,11 @@ impl Connection {
                     static OCH_LOG_COUNT: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
                     let n = OCH_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Routine, and emitted on entirely successful ticks — at
+                    // WARN it buried the real warnings (826 of these in one
+                    // evening, 568 of them inside a single error-free session).
                     if n < 3 || n.is_multiple_of(100) {
-                        tracing::warn!(
+                        tracing::debug!(
                             "tick={} use_modern={} cmd_bytes={:02x?} och_block_size={}",
                             n,
                             self.use_modern_protocol,
