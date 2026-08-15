@@ -14,7 +14,6 @@
 //! - Tune health scoring with per-region quality assessment
 
 pub mod accel_enrich;
-pub mod afr_validity;
 pub mod anomaly;
 pub mod delay_measure;
 pub mod health;

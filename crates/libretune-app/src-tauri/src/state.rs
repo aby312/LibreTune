@@ -166,7 +166,6 @@ pub struct AutoTuneConfig {
     /// the out-of-range rail, a controller's startup/calibration output, or a
     /// frozen channel. Stateful because the test is how long a value has stood
     /// still, not what the value is.
-    pub afr_validity: libretune_core::autotune::afr_validity::AfrValidity,
     /// This channel's out-of-range AFR value, or NaN when unknown. Only a
     /// known rail can be treated as a status value; for every other ECU the
     /// validity check falls back to the value-agnostic frozen-channel rule.

@@ -226,7 +226,6 @@ pub async fn start_autotune(
         secondary_y_bins,
         last_tps: None,
         last_timestamp_ms: None,
-        afr_validity: Default::default(),
         afr_rail,
         reference_tables: reference_tables.clone(),
         strict_lambda_match: strict,

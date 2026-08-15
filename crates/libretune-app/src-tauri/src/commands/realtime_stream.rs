@@ -201,6 +201,18 @@ pub(crate) async fn feed_data_logger(app_state: &AppState, data: &HashMap<String
     logger.record(values);
 }
 
+/// Whether a wideband reading is the top of its scale rather than a mixture.
+///
+/// The ceiling is a real reading's upper bound, so a sample sitting on it is
+/// "at least this lean" - unusable for learning fuel either way. Readings below
+/// it are kept regardless of how long they hold: the low-resolution values a
+/// controller emits during calibration (a 14Point7 Spartan 2 sends 13.33 and
+/// 16.67) occur before the engine is making a mixture at all, and autotune's
+/// own rpm and coolant filters already exclude that window.
+pub(crate) fn afr_out_of_range(afr: f64, rail: f64) -> bool {
+    !rail.is_nan() && afr >= rail - 0.05
+}
+
 pub(crate) async fn feed_autotune_data(
     app_state: &AppState,
     data: &HashMap<String, f64>,
@@ -267,19 +279,20 @@ pub(crate) async fn feed_autotune_data(
         .map(|v| if *v < 2.0 { *v * 14.7 } else { *v }) // Convert lambda to AFR
         .unwrap_or(14.7);
 
-    // Drop readings the wideband is holding rather than measuring: the
-    // out-of-range rail, a controller's startup/calibration output, or a frozen
-    // channel. On one 59-minute drive this is 10.6% of running samples, all of
-    // it the 19.7 rail during overrun, every one of which previously fed VE
-    // learning as a genuine lean reading.
-    let afr_rail = config.afr_rail;
-    if let Some(reason) = config.afr_validity.check(afr, current_time_ms, afr_rail) {
+    // A wideband that is out of range reports the end of its scale, not a
+    // mixture. On Speeduino's 0.1-resolution AFR channel that ceiling is 19.7,
+    // and it accounts for 13.1% of running samples in a 59-minute drive - every
+    // one of which previously fed VE learning as a genuine lean reading, pushing
+    // fuel in where the sensor had simply stopped measuring.
+    //
+    // `afr_rail` is NaN for ECUs whose ceiling we do not know, and the
+    // comparison is then false, so nothing is rejected.
+    if afr_out_of_range(afr, config.afr_rail) {
         static AFR_REJECT_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = AFR_REJECT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n < 3 || n.is_multiple_of(500) {
             tracing::debug!(
-                "autotune: sample dropped ({}), afr={:.2}, total dropped={}",
-                reason.label(),
+                "autotune: sample dropped (wideband out of range), afr={:.2}, total dropped={}",
                 afr,
                 n + 1
             );
@@ -998,9 +1011,33 @@ pub async fn start_realtime_stream(
 
 #[cfg(test)]
 mod dropped_sample_tests {
-    use super::note_dropped_log_sample;
+    use super::{afr_out_of_range, note_dropped_log_sample};
     use crate::state::LOGGER_RECORDING;
     use std::sync::atomic::Ordering::Relaxed;
+
+    /// 19.7 is the top of Speeduino's AFR channel - values run 19.0, 19.1 ...
+    /// 19.7 with nothing above - so it means "off the scale", not "very lean".
+    /// It was 13.1% of running samples across one drive.
+    #[test]
+    fn only_the_top_of_the_scale_is_refused() {
+        assert!(afr_out_of_range(19.7, 19.7));
+        assert!(
+            afr_out_of_range(19.75, 19.7),
+            "float noise must not slip through"
+        );
+        assert!(
+            !afr_out_of_range(19.6, 19.7),
+            "19.6 is a real, very lean reading"
+        );
+        assert!(
+            !afr_out_of_range(13.33, 19.7),
+            "a calibration value is still in range"
+        );
+        assert!(
+            !afr_out_of_range(19.7, f64::NAN),
+            "unknown ceiling rejects nothing"
+        );
+    }
 
     #[test]
     fn drop_counted_only_while_recording() {
