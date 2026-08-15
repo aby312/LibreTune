@@ -33,7 +33,7 @@ export function SettingsView() {
       
       if (newValue) {
         // Start realtime streaming when demo mode is enabled
-        await invoke("start_realtime_stream", { intervalMs: 20 });
+        await invoke("start_realtime_stream", { intervalMs: 50 });
       } else {
         // Stop streaming when demo mode is disabled
         await invoke("stop_realtime_stream");

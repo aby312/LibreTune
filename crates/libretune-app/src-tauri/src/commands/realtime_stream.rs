@@ -416,7 +416,7 @@ pub async fn start_realtime_stream(
     // limit) and 61 Hz CRC-framed. 50 Hz leaves headroom for page reads and
     // writes to interleave while lifting the ceiling on datalogging, which
     // cannot record faster than the stream polls.
-    let interval = interval_ms.unwrap_or(20);
+    let interval = interval_ms.unwrap_or(50);
     let is_demo = *state.demo_mode.lock().await;
 
     // In demo mode, we only need the definition
@@ -544,6 +544,13 @@ pub async fn start_realtime_stream(
         let mut local_ticks_error: u64 = 0;
         // Sustained-failure tracking for link recovery (see the recovery block
         // after the raw-result diagnostics below).
+        // The UI is repainted from these events; the logger and autotune are fed
+        // separately below. Polling at 50 Hz to feed the logger does not mean the
+        // screen needs 50 repaints a second — each one redraws every gauge canvas,
+        // and at 50 Hz that starved the webview's event loop and froze the window
+        // on a real car. Emit at ~20 Hz, which is smoother than the eye needs.
+        const UI_EMIT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        let mut last_ui_emit: Option<std::time::Instant> = None;
         let mut consecutive_failures: u32 = 0;
         let mut link_reported_down = false;
         let mut last_recovery_attempt: Option<std::time::Instant> = None;
@@ -864,8 +871,16 @@ pub async fn start_realtime_stream(
                             }
                         }
 
-                        if let Err(e) = app_handle.emit("realtime:update", &data) {
-                            stream_log(&format!("emit FAILED (real): {}", e));
+                        let ui_due = last_ui_emit
+                            .map(|t| t.elapsed() >= UI_EMIT_MIN_INTERVAL)
+                            .unwrap_or(true);
+                        if ui_due {
+                            last_ui_emit = Some(std::time::Instant::now());
+                        }
+                        if ui_due {
+                            if let Err(e) = app_handle.emit("realtime:update", &data) {
+                                stream_log(&format!("emit FAILED (real): {}", e));
+                            }
                         }
 
                         // Log parsed channel count — every tick for the first 30, then every 20th (~1/sec)

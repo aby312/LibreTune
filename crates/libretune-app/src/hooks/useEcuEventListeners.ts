@@ -93,7 +93,7 @@ export function useEcuEventListeners(deps: UseEcuEventListenersDeps) {
             await fetchMenuTree(values);
             const demoEnabled = Boolean(event.payload as unknown as boolean);
             if (demoEnabled) {
-              try { await invoke('start_realtime_stream', { intervalMs: 20 }); } catch (e) { /* ignore */ }
+              try { await invoke('start_realtime_stream', { intervalMs: 50 }); } catch (e) { /* ignore */ }
             } else {
               try { await invoke('stop_realtime_stream'); } catch (e) { /* ignore */ }
             }

@@ -23,7 +23,7 @@ export function useRealtimeStream(
         if (cancelled) return;
 
         try {
-          await invoke("start_realtime_stream", { intervalMs: 20 });
+          await invoke("start_realtime_stream", { intervalMs: 50 });
         } catch (e) {
           console.warn("Realtime stream failed, falling back to polling with backoff:", e);
           if (cancelled) return;
@@ -71,7 +71,7 @@ export function useRealtimeStream(
           if ((stalledSinceStart || stalledAfterData) && now - lastRestartTime > 10000) {
             lastRestartTime = now;
             streamStartedAt = now;
-            invoke("start_realtime_stream", { intervalMs: 20 }).catch(() => {});
+            invoke("start_realtime_stream", { intervalMs: 50 }).catch(() => {});
           }
         }, 2000);
       })();
