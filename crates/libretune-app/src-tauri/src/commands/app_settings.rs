@@ -232,6 +232,7 @@ fn default_commit_message_format() -> String {
 }
 
 pub(crate) fn save_settings(app: &tauri::AppHandle, settings: &Settings) {
+    apply_unit_symbols(settings);
     let settings_path = get_settings_path(app);
     // Ensure parent directory exists
     if let Some(parent) = settings_path.parent() {
@@ -336,6 +337,22 @@ fn default_settings() -> Settings {
     }
 }
 
+/// Seed the INI preprocessor from the unit preference.
+///
+/// An INI selects metric units through `#if CELSIUS` blocks, and TunerStudio
+/// defines that symbol from the project's `ecuSettings` line. LibreTune never
+/// carried it, so the Fahrenheit `#else` arm always won: a 23 degC cold start
+/// showed 73 on the gauge, labelled with the INI's generic "TEMP". Applying it
+/// here covers every definition load, since they all funnel through the same
+/// parser.
+pub(crate) fn apply_unit_symbols(settings: &Settings) {
+    let mut symbols: Vec<String> = Vec::new();
+    if !settings.units_system.eq_ignore_ascii_case("imperial") {
+        symbols.push("CELSIUS".to_string());
+    }
+    libretune_core::ini::set_default_symbols(symbols);
+}
+
 pub(crate) fn load_settings(app: &tauri::AppHandle) -> Settings {
     let settings_path = get_settings_path(app);
     if let Ok(content) = std::fs::read_to_string(&settings_path) {
@@ -343,6 +360,7 @@ pub(crate) fn load_settings(app: &tauri::AppHandle) -> Settings {
             if settings.runtime_packet_mode.trim().is_empty() {
                 settings.runtime_packet_mode = default_runtime_packet_mode();
             }
+            apply_unit_symbols(&settings);
             return settings;
         }
     }
@@ -351,6 +369,7 @@ pub(crate) fn load_settings(app: &tauri::AppHandle) -> Settings {
     if s.runtime_packet_mode.trim().is_empty() {
         s.runtime_packet_mode = default_runtime_packet_mode();
     }
+    apply_unit_symbols(&s);
     s
 }
 

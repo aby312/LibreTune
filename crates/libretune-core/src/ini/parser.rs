@@ -48,13 +48,41 @@ struct IncludeContext {
     pub defined_symbols: HashSet<String>,
 }
 
+/// Preprocessor symbols every parse starts with, on top of anything the INI
+/// `#set`s itself.
+///
+/// TunerStudio seeds these from the project's `ecuSettings` line
+/// (`ecuSettings=AFR|CELSIUS|…`), which is how an INI's `#if CELSIUS` blocks
+/// select metric units. Nothing carried that into LibreTune, so the `#else`
+/// arm always won and every temperature came out in Fahrenheit while wearing
+/// the INI's generic "TEMP" label — a 23 °C cold start read 73 on the gauge.
+/// The host application sets this from its own units preference.
+static DEFAULT_SYMBOLS: std::sync::RwLock<Option<HashSet<String>>> = std::sync::RwLock::new(None);
+
+/// Replace the preprocessor symbols seeded into every subsequent parse.
+/// Call before loading a definition; affects parses started after it returns.
+pub fn set_default_symbols<I: IntoIterator<Item = String>>(symbols: I) {
+    let set: HashSet<String> = symbols.into_iter().collect();
+    if let Ok(mut guard) = DEFAULT_SYMBOLS.write() {
+        *guard = Some(set);
+    }
+}
+
+fn default_symbols() -> HashSet<String> {
+    DEFAULT_SYMBOLS
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
+}
+
 impl IncludeContext {
     fn new(base_path: Option<&Path>) -> Self {
         Self {
             base_dir: base_path.and_then(|p| p.parent().map(|d| d.to_path_buf())),
             included_files: HashSet::new(),
             depth: 0,
-            defined_symbols: HashSet::new(),
+            defined_symbols: default_symbols(),
         }
     }
 
@@ -3207,6 +3235,47 @@ mod tests {
     /// no arm for either — `delayAfterPortOpen` stayed 0 (handshake raced the
     /// port open) and `tsWriteBlocks` was never matched at all because only the
     /// bare `writeBlocks` spelling was handled.
+    /// An INI picks metric units with `#if CELSIUS`. TunerStudio defines that
+    /// from the project's `ecuSettings`; nothing carried it into LibreTune, so
+    /// the Fahrenheit `#else` arm always won and a 23 degC cold start read 73
+    /// on the gauge under a generic "TEMP" label.
+    #[test]
+    fn celsius_symbol_selects_the_metric_branch() {
+        let ini = concat!(
+            "[Constants]
+",
+            "page = 1
+",
+            "#if CELSIUS
+",
+            "tempTest = scalar, U08, 0, \"C\", 1.0, -40, -40, 102.0, 0
+",
+            "#else
+",
+            "tempTest = scalar, U08, 0, \"F\", 1.8, -22.23, -40, 215.0, 0
+",
+            "#endif
+"
+        );
+
+        set_default_symbols(Vec::<String>::new());
+        let f = parse_ini(ini).expect("parses");
+        assert_eq!(
+            f.constants.get("tempTest").map(|c| c.units.as_str()),
+            Some("F"),
+            "without the symbol the Fahrenheit branch is taken"
+        );
+
+        set_default_symbols(vec!["CELSIUS".to_string()]);
+        let c = parse_ini(ini).expect("parses");
+        assert_eq!(
+            c.constants.get("tempTest").map(|c| c.units.as_str()),
+            Some("C"),
+            "seeding CELSIUS must select the metric branch"
+        );
+        set_default_symbols(Vec::<String>::new());
+    }
+
     #[test]
     fn constants_section_parses_port_open_delay_and_ts_write_blocks() {
         let mut def = EcuDefinition::default();
