@@ -18,6 +18,15 @@ use crate::ini::{AdaptiveTiming, AdaptiveTimingConfig, EcuType, Endianness, Prot
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Extra quiet time added to the declared burn window, on top of
+/// `pageActivationDelay`. See [`Connection::burn`] for why the declared value
+/// on its own is not enough.
+const BURN_SETTLE_MS: u64 = 600;
+
+/// Minimum quiet time after a legacy write frame before the ECU will service
+/// anything else. See [`Connection::inter_frame_delay`].
+const LEGACY_WRITE_SETTLE_MS: u64 = 30;
+
 /// Parse a command string with escape sequences into raw bytes
 /// Handles: \xNN (hex), \n, \r, \t, \\, \0, and regular characters
 fn parse_command_string(s: &str) -> Vec<u8> {
@@ -1813,10 +1822,46 @@ impl Connection {
         blocking_factor.saturating_sub(8).max(1)
     }
 
+    /// How long to leave the link idle after handing the ECU a write frame of
+    /// `frame_len` bytes, before sending it anything else.
+    ///
+    /// A legacy write is answered by silence, so the host has no signal that
+    /// the ECU has finished with a frame and must simply wait long enough. Two
+    /// things set how long. The frame's own wire time is a floor — on a real
+    /// UART a 250-byte frame occupies a 115200 link for about 22 ms, and USB
+    /// CDC, which every modern Speeduino is reached through, delivers it at USB
+    /// speed instead and removes that natural spacing. On top of that the
+    /// firmware needs a service window to apply the bytes it just received;
+    /// until it has, the next command on the wire is consumed as table data.
+    ///
+    /// The window was measured directly against the bench simulator on
+    /// 19 Aug 2026, replaying the frames with no app in the loop and sweeping
+    /// the gap: at 10 ms the following page read was swallowed as table data
+    /// and the read returned nothing; 20 ms was the first clean value; 30 ms
+    /// and above were clean, which is what the raw-protocol reference writer
+    /// has always used and why it has never reproduced the corruption. Note
+    /// that this is not the same as the chunking bug — LibreTune's frames were
+    /// correctly sized and 22.8 ms apart, and the *last* frame's 10.5 ms tail
+    /// gap alone was enough to corrupt the table.
+    ///
+    /// A modern CRC ECU acknowledges the write, and that acknowledgement is
+    /// proof it is done with the frame, so there is nothing to guess at there.
+    fn inter_frame_delay(&self, frame_len: usize) -> Duration {
+        let baud = self.config.baud_rate.max(1) as u64;
+        // 10 bits per byte on the wire: 8 data, start, stop.
+        let wire_ms = (frame_len as u64 * 10 * 1000).div_ceil(baud);
+        let ini_ms = self.get_effective_min_wait();
+        let floor = if self.use_modern_protocol {
+            5
+        } else {
+            LEGACY_WRITE_SETTLE_MS
+        };
+        Duration::from_millis(wire_ms.max(ini_ms).max(floor))
+    }
+
     /// Write a full page to ECU, respecting blocking factor (same chunking as `read_page`).
     pub fn write_page(&mut self, page: u8, data: &[u8]) -> Result<(), ProtocolError> {
         let chunk_size = self.effective_write_chunk();
-        let inter_chunk_ms = self.get_effective_min_wait().max(5);
 
         let mut offset = 0usize;
         while offset < data.len() {
@@ -1863,9 +1908,8 @@ impl Connection {
             }
 
             offset = end;
-            if offset < data.len() {
-                std::thread::sleep(Duration::from_millis(inter_chunk_ms));
-            }
+            // write_memory paces each frame it sends; a second delay here
+            // would only double the cost of every bulk page write.
         }
 
         Ok(())
@@ -1899,9 +1943,7 @@ impl Connection {
                 })?;
                 offset += take;
                 remaining = tail;
-                if !remaining.is_empty() {
-                    std::thread::sleep(Duration::from_millis(self.get_effective_min_wait().max(5)));
-                }
+                // Pacing is handled once, after the frame actually goes out.
             }
             return Ok(());
         }
@@ -1951,6 +1993,7 @@ impl Connection {
             params.offset,
             &params.data,
         )?;
+        let cmd_len = cmd.len();
 
         let result = if self.use_modern_protocol {
             // Modern protocol: wrap in CRC packet
@@ -1970,6 +2013,12 @@ impl Connection {
 
         if result.is_ok() {
             self.last_written_page = Some(params.page);
+            // Leave the link idle long enough for the ECU to drain this frame
+            // before anything else — the next chunk, a burn, a read-back, or a
+            // realtime poll — is put on the wire. Nothing downstream can tell
+            // that the buffer is still full, because a legacy write is
+            // answered by silence either way.
+            std::thread::sleep(self.inter_frame_delay(cmd_len));
         }
         result
     }
@@ -2087,14 +2136,32 @@ impl Connection {
         // Wait for flash write to complete
         // Flash writes typically take 1-3 seconds depending on ECU
         // Use page_activation_delay as minimum, but ensure at least 2 seconds for safety
-        let delay = self
+        let declared = self
             .protocol_settings
             .as_ref()
             .map(|p| p.page_activation_delay.max(2000))
-            .unwrap_or(2000);
-
-        tracing::debug!("burn: waiting {}ms for flash write to complete", delay);
-        std::thread::sleep(Duration::from_millis(delay as u64));
+            .unwrap_or(2000) as u64;
+        // The ECU starts its busy window when it *processes* the burn, not when
+        // we put the command on the wire, so waiting exactly the declared
+        // window can return while the ECU is still deaf. During that window it
+        // is not servicing serial at all: bytes pile into the 257-byte receive
+        // buffer unread. Measured on the bench 18 Aug 2026 — a 2000 ms wait
+        // against a 2000 ms window let the next table write's first frame land
+        // inside the window, where it sat unserviced until the second frame
+        // overflowed the buffer, losing 13 bytes and leaving the ECU consuming
+        // following commands as table data. The raw-protocol reference writer
+        // has always waited 2.6 s here and has never reproduced it.
+        let settle = BURN_SETTLE_MS;
+        tracing::debug!(
+            "burn: waiting {}ms ({}ms declared + {}ms settle) for flash write to complete",
+            declared + settle,
+            declared,
+            settle
+        );
+        std::thread::sleep(Duration::from_millis(declared + settle));
+        // Anything that arrived while the ECU was deaf is noise to us and, more
+        // importantly, may be a partial frame to it.
+        self.clear_rx_buffer();
 
         tracing::debug!("burn: flash write complete for page {}", page);
         // Successful burn clears the auto-burn-on-page-change tracker.
@@ -2910,6 +2977,10 @@ mod tests {
         bursts: Vec<usize>,
         /// Bytes lost to the ring, summed over all bursts.
         dropped: usize,
+        /// Idle time on the link before each burst — how long this ECU was
+        /// given to drain the previous frame.
+        gaps: Vec<Duration>,
+        last_burst: Option<Instant>,
         /// Bytes waiting to go back to the host.
         out: VecDeque<u8>,
         /// Store the complement of whatever is written to this (page, offset),
@@ -2924,6 +2995,8 @@ mod tests {
                 state: MegaState::Idle,
                 bursts: Vec::new(),
                 dropped: 0,
+                gaps: Vec::new(),
+                last_burst: None,
                 out: VecDeque::new(),
                 corrupt_at: None,
             }
@@ -2936,6 +3009,10 @@ mod tests {
         /// One burst from the host: fill the ring, drop the overflow, then let
         /// the command handler drain what survived.
         fn burst(&mut self, bytes: &[u8]) {
+            let now = Instant::now();
+            self.gaps
+                .push(self.last_burst.map_or(Duration::ZERO, |t| now - t));
+            self.last_burst = Some(now);
             self.bursts.push(bytes.len());
             let kept = bytes.len().min(MEGA_RX_CAPACITY);
             self.dropped += bytes.len() - kept;
@@ -3144,6 +3221,64 @@ mod tests {
         assert_eq!(c.dropped, 0, "no byte may be dropped by the ECU ring");
         assert_eq!(&c.page(1)[..256], &ignition[..], "ignition table corrupted");
         assert_eq!(&c.page(2)[..256], &ve[..], "VE table lost or corrupted");
+
+        // Correctly sized frames are not enough on their own: the bench sweep
+        // showed a following command sent 10.5 ms after a write frame gets
+        // eaten as table data. Every frame here must be followed by at least
+        // the ECU's measured service window.
+        let settle = Duration::from_millis(LEGACY_WRITE_SETTLE_MS);
+        for (i, gap) in c.gaps.iter().enumerate().skip(1) {
+            let prev = c.bursts[i - 1];
+            assert!(
+                *gap >= settle,
+                "frame {i} followed a {prev}-byte frame after only {gap:?}, \
+                 inside the ECU's {settle:?} service window"
+            );
+        }
+    }
+
+    /// The pacing rule. The bench sweep put the ECU's service window at 20 ms
+    /// (10 ms corrupts, 20 ms is the first clean value), so a small trailing
+    /// frame must not be allowed to scale the delay down — that 20-byte second
+    /// chunk followed by a read 10.5 ms later is exactly what corrupted the
+    /// ignition table with correctly sized frames.
+    #[test]
+    fn legacy_write_frames_are_paced_for_the_ecus_service_window() {
+        let core = Arc::new(Mutex::new(MegaCore::new()));
+        let mut conn = speeduino_conn(&core);
+
+        assert_eq!(conn.config.baud_rate, 115_200, "test assumes a 115200 link");
+        let settle = Duration::from_millis(LEGACY_WRITE_SETTLE_MS);
+        assert!(
+            settle >= Duration::from_millis(20),
+            "below the measured floor"
+        );
+        assert!(conn.inter_frame_delay(250) >= settle);
+        assert!(
+            conn.inter_frame_delay(20) >= settle,
+            "a short trailing frame still needs the full service window"
+        );
+
+        // A slow link needs proportionally more: wire time takes over.
+        conn.config.baud_rate = 9_600;
+        assert!(conn.inter_frame_delay(250) >= Duration::from_millis(260));
+
+        // The INI's own inter-write delay still wins when it is the larger.
+        conn.config.baud_rate = 115_200;
+        let mut proto = ProtocolSettings::default();
+        proto.blocking_factor = SPEEDUINO_BLOCKING_FACTOR;
+        proto.inter_write_delay = 100;
+        conn.set_protocol(proto, Endianness::Big);
+        conn.use_modern_protocol = false;
+        assert_eq!(conn.inter_frame_delay(8), Duration::from_millis(100));
+
+        // A CRC ECU acknowledges the write, so it needs no blind wait.
+        conn.use_modern_protocol = true;
+        let mut proto = ProtocolSettings::default();
+        proto.blocking_factor = SPEEDUINO_BLOCKING_FACTOR;
+        conn.set_protocol(proto, Endianness::Big);
+        conn.use_modern_protocol = true;
+        assert!(conn.inter_frame_delay(20) < settle);
     }
 
     /// Chunking closes the overrun we know about. The read-back is what makes
