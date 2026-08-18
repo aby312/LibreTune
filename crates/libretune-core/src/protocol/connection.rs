@@ -373,6 +373,9 @@ pub struct Connection {
     /// blocking I/O polling loops abort early so `disconnect()` can complete even
     /// while another thread is mid-read (Issue #71: "disconnect does nothing").
     cancel: Arc<AtomicBool>,
+    /// Whether `write_memory_verified` reads back after writing. See
+    /// [`set_verify_writes`](Connection::set_verify_writes).
+    verify_writes: bool,
 }
 
 impl Connection {
@@ -398,6 +401,7 @@ impl Connection {
             last_written_page: None,
             ecu_type: EcuType::Unknown,
             cancel: Arc::new(AtomicBool::new(false)),
+            verify_writes: true,
         }
     }
 
@@ -437,6 +441,7 @@ impl Connection {
             last_written_page: None,
             ecu_type: EcuType::Unknown,
             cancel: Arc::new(AtomicBool::new(false)),
+            verify_writes: true,
         }
     }
 
@@ -1969,6 +1974,72 @@ impl Connection {
         result
     }
 
+    /// Whether [`write_memory_verified`](Self::write_memory_verified) actually
+    /// reads back. On by default; callers that are writing continuously (a
+    /// live slider, a bulk restore that verifies by page CRC afterwards) can
+    /// turn it off to save the extra round-trip.
+    pub fn set_verify_writes(&mut self, enabled: bool) {
+        self.verify_writes = enabled;
+    }
+
+    /// As [`write_memory`](Self::write_memory), but read the region straight
+    /// back and fail if the ECU is not holding what was sent.
+    ///
+    /// A legacy-protocol write is fire-and-forget: the ECU sends no status, so
+    /// `write_memory` returning `Ok` means only "the bytes left the host". That
+    /// is not the same as "the ECU stored them", and the difference has already
+    /// bitten this project — an oversized frame had its tail dropped and the
+    /// following write consumed as data, leaving a corrupted ignition table in
+    /// RAM while both writes reported success. Chunking closes that particular
+    /// hole; reading back is what catches the next one.
+    pub fn write_memory_verified(
+        &mut self,
+        params: WriteMemoryParams,
+    ) -> Result<(), ProtocolError> {
+        let page = params.page;
+        let offset = params.offset;
+        let expected = params.data.clone();
+        self.write_memory(params)?;
+
+        if !self.verify_writes || expected.is_empty() {
+            return Ok(());
+        }
+
+        // Read back in the same frame sizes the write used, so a mismatch
+        // points at a real ECU-side difference rather than an oversized read.
+        let chunk = self.effective_write_chunk();
+        let mut actual = Vec::with_capacity(expected.len());
+        let mut at = offset as usize;
+        while actual.len() < expected.len() {
+            let take = chunk.min(expected.len() - actual.len());
+            let part = self.read_memory(ReadMemoryParams {
+                page,
+                offset: at as u16,
+                length: take as u16,
+                can_id: 0,
+            })?;
+            if part.len() < take {
+                return Err(ProtocolError::ProtocolError(format!(
+                    "read-back of page {page} offset {at} returned {} of {take} bytes",
+                    part.len()
+                )));
+            }
+            actual.extend_from_slice(&part[..take]);
+            at += take;
+        }
+
+        if let Some(i) = (0..expected.len()).find(|&i| expected[i] != actual[i]) {
+            return Err(ProtocolError::WriteVerificationFailed {
+                page,
+                offset: offset.saturating_add(i as u16),
+                expected: expected[i],
+                actual: actual[i],
+            });
+        }
+
+        Ok(())
+    }
+
     /// Burn current page to flash using INI-defined command format
     pub fn burn(&mut self, params: BurnParams) -> Result<(), ProtocolError> {
         let page = params.page as usize;
@@ -2586,7 +2657,7 @@ mod tests {
 
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
     /// The early-return condition is the whole safety surface of the
@@ -2813,6 +2884,8 @@ mod tests {
         Idle,
         /// Bytes gathered after the `M`: page, offset, count, big-endian pairs.
         Header(Vec<u8>),
+        /// The same six fields after an `r`, which answers with page bytes.
+        ReadHeader(Vec<u8>),
         Data {
             page: u16,
             at: usize,
@@ -2837,7 +2910,11 @@ mod tests {
         bursts: Vec<usize>,
         /// Bytes lost to the ring, summed over all bursts.
         dropped: usize,
-        ack: usize,
+        /// Bytes waiting to go back to the host.
+        out: VecDeque<u8>,
+        /// Store the complement of whatever is written to this (page, offset),
+        /// standing in for any reason the ECU might not hold what was sent.
+        corrupt_at: Option<(u16, usize)>,
     }
 
     impl MegaCore {
@@ -2847,7 +2924,8 @@ mod tests {
                 state: MegaState::Idle,
                 bursts: Vec::new(),
                 dropped: 0,
-                ack: 0,
+                out: VecDeque::new(),
+                corrupt_at: None,
             }
         }
 
@@ -2866,12 +2944,15 @@ mod tests {
             }
             // Legacy writes are fire-and-forget, but the line is never truly
             // silent; the host reads *something* back and calls the write good.
-            self.ack += 1;
+            if self.out.is_empty() {
+                self.out.push_back(0x00);
+            }
         }
 
         fn step(&mut self, b: u8) {
             self.state = match std::mem::replace(&mut self.state, MegaState::Idle) {
                 MegaState::Idle if b == b'M' => MegaState::Header(Vec::with_capacity(6)),
+                MegaState::Idle if b == b'r' => MegaState::ReadHeader(Vec::with_capacity(6)),
                 MegaState::Idle => MegaState::Idle,
                 MegaState::Header(mut h) => {
                     h.push(b);
@@ -2885,10 +2966,26 @@ mod tests {
                         }
                     }
                 }
+                MegaState::ReadHeader(mut h) => {
+                    h.push(b);
+                    if h.len() < 6 {
+                        MegaState::ReadHeader(h)
+                    } else {
+                        let page = u16::from_be_bytes([h[0], h[1]]);
+                        let at = u16::from_be_bytes([h[2], h[3]]) as usize;
+                        let count = u16::from_be_bytes([h[4], h[5]]) as usize;
+                        let img = self.pages.entry(page).or_insert_with(|| vec![0u8; 1024]);
+                        let end = (at + count).min(img.len());
+                        let slice = img[at.min(end)..end].to_vec();
+                        self.out.extend(slice);
+                        MegaState::Idle
+                    }
+                }
                 MegaState::Data { page, at, left } => {
+                    let flip = self.corrupt_at == Some((page, at));
                     let img = self.pages.entry(page).or_insert_with(|| vec![0u8; 1024]);
                     if at < img.len() {
-                        img[at] = b;
+                        img[at] = if flip { !b } else { b };
                     }
                     if left > 1 {
                         MegaState::Data {
@@ -2919,12 +3016,11 @@ mod tests {
     impl Read for MegaChannel {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let mut core = self.0.lock().unwrap();
-            if core.ack == 0 || buf.is_empty() {
-                return Ok(0);
+            let n = core.out.len().min(buf.len());
+            for slot in buf.iter_mut().take(n) {
+                *slot = core.out.pop_front().unwrap();
             }
-            core.ack -= 1;
-            buf[0] = 0x00;
-            Ok(1)
+            Ok(n)
         }
     }
 
@@ -2942,7 +3038,7 @@ mod tests {
             Ok(Box::new(MegaChannel(Arc::clone(&self.0))))
         }
         fn bytes_to_read(&mut self) -> std::io::Result<u32> {
-            Ok(self.0.lock().unwrap().ack as u32)
+            Ok(self.0.lock().unwrap().out.len() as u32)
         }
     }
 
@@ -3043,6 +3139,60 @@ mod tests {
         assert_eq!(c.dropped, 0, "no byte may be dropped by the ECU ring");
         assert_eq!(&c.page(1)[..256], &ignition[..], "ignition table corrupted");
         assert_eq!(&c.page(2)[..256], &ve[..], "VE table lost or corrupted");
+    }
+
+    /// Chunking closes the overrun we know about. The read-back is what makes
+    /// the next silent divergence visible, so it has to actually catch one:
+    /// a single byte the ECU did not store as sent must fail the write rather
+    /// than return Ok, and it must name the cell.
+    #[test]
+    fn verified_write_catches_a_byte_the_ecu_did_not_store() {
+        let core = Arc::new(Mutex::new(MegaCore::new()));
+        core.lock().unwrap().corrupt_at = Some((1, 100));
+        let mut conn = speeduino_conn(&core);
+
+        let table: Vec<u8> = (0..256u32).map(|i| 40 + (i % 30) as u8).collect();
+        let err = conn
+            .write_memory_verified(WriteMemoryParams {
+                can_id: 0,
+                page: 1,
+                offset: 0,
+                data: table.clone(),
+            })
+            .expect_err("a byte the ECU did not store must fail the write");
+
+        match err {
+            ProtocolError::WriteVerificationFailed {
+                page,
+                offset,
+                expected,
+                actual,
+            } => {
+                assert_eq!((page, offset), (1, 100));
+                assert_eq!(expected, table[100]);
+                assert_eq!(actual, !table[100]);
+            }
+            other => panic!("expected a verification failure, got {other:?}"),
+        }
+    }
+
+    /// The same write, with nothing wrong at the ECU, must pass silently —
+    /// otherwise the check would be unusable in the table editor.
+    #[test]
+    fn verified_write_passes_when_the_ecu_agrees() {
+        let core = Arc::new(Mutex::new(MegaCore::new()));
+        let mut conn = speeduino_conn(&core);
+
+        let table: Vec<u8> = (0..256u32).map(|i| 40 + (i % 30) as u8).collect();
+        conn.write_memory_verified(WriteMemoryParams {
+            can_id: 0,
+            page: 1,
+            offset: 0,
+            data: table.clone(),
+        })
+        .expect("an honest ECU must verify clean");
+
+        assert_eq!(&core.lock().unwrap().page(1)[..256], &table[..]);
     }
 
     #[test]
