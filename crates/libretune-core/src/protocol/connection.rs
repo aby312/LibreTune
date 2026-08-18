@@ -2586,6 +2586,8 @@ mod tests {
 
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     /// The early-return condition is the whole safety surface of the
     /// expected-length read: returning too soon yields a truncated message,
@@ -2795,6 +2797,252 @@ mod tests {
                 "frame of {f} exceeds what write_memory accepts"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Mega2560 RX-limit regression (bench simulator acceptance behavior 5)
+    // ---------------------------------------------------------------------
+
+    /// Speeduino's own INI: "Serial buffer is 257 bytes and there are 6 bytes
+    /// of overhead ... payload is therefore 257-6=251".
+    const MEGA_RX_CAPACITY: usize = 257;
+    const SPEEDUINO_BLOCKING_FACTOR: u32 = 251;
+
+    /// What the `M` handler is in the middle of when the next byte arrives.
+    enum MegaState {
+        Idle,
+        /// Bytes gathered after the `M`: page, offset, count, big-endian pairs.
+        Header(Vec<u8>),
+        Data {
+            page: u16,
+            at: usize,
+            left: usize,
+        },
+    }
+
+    /// The Mega2560's serial front end as the bench simulator models it
+    /// (`LibreTune-test/sim-ecu`, `MEGA_RX_CAPACITY 257`, acceptance behavior 5).
+    ///
+    /// Two properties matter and neither is obvious from the protocol spec.
+    /// The RX ring holds 257 bytes and drops the rest of an over-long burst
+    /// without complaint, and the `M` handler is a state machine that keeps
+    /// taking whatever bytes arrive next as table data when a frame promised
+    /// more than turned up. One oversized write therefore corrupts the page it
+    /// was aimed at *and* eats the command behind it, with nothing on the wire
+    /// to say so.
+    struct MegaCore {
+        pages: HashMap<u16, Vec<u8>>,
+        state: MegaState,
+        /// Length of each burst the host handed to the port.
+        bursts: Vec<usize>,
+        /// Bytes lost to the ring, summed over all bursts.
+        dropped: usize,
+        ack: usize,
+    }
+
+    impl MegaCore {
+        fn new() -> Self {
+            Self {
+                pages: HashMap::new(),
+                state: MegaState::Idle,
+                bursts: Vec::new(),
+                dropped: 0,
+                ack: 0,
+            }
+        }
+
+        fn page(&self, page: u16) -> &[u8] {
+            self.pages.get(&page).map(|p| p.as_slice()).unwrap_or(&[])
+        }
+
+        /// One burst from the host: fill the ring, drop the overflow, then let
+        /// the command handler drain what survived.
+        fn burst(&mut self, bytes: &[u8]) {
+            self.bursts.push(bytes.len());
+            let kept = bytes.len().min(MEGA_RX_CAPACITY);
+            self.dropped += bytes.len() - kept;
+            for &b in &bytes[..kept] {
+                self.step(b);
+            }
+            // Legacy writes are fire-and-forget, but the line is never truly
+            // silent; the host reads *something* back and calls the write good.
+            self.ack += 1;
+        }
+
+        fn step(&mut self, b: u8) {
+            self.state = match std::mem::replace(&mut self.state, MegaState::Idle) {
+                MegaState::Idle if b == b'M' => MegaState::Header(Vec::with_capacity(6)),
+                MegaState::Idle => MegaState::Idle,
+                MegaState::Header(mut h) => {
+                    h.push(b);
+                    if h.len() < 6 {
+                        MegaState::Header(h)
+                    } else {
+                        MegaState::Data {
+                            page: u16::from_be_bytes([h[0], h[1]]),
+                            at: u16::from_be_bytes([h[2], h[3]]) as usize,
+                            left: u16::from_be_bytes([h[4], h[5]]) as usize,
+                        }
+                    }
+                }
+                MegaState::Data { page, at, left } => {
+                    let img = self.pages.entry(page).or_insert_with(|| vec![0u8; 1024]);
+                    if at < img.len() {
+                        img[at] = b;
+                    }
+                    if left > 1 {
+                        MegaState::Data {
+                            page,
+                            at: at + 1,
+                            left: left - 1,
+                        }
+                    } else {
+                        MegaState::Idle
+                    }
+                }
+            };
+        }
+    }
+
+    struct MegaChannel(Arc<Mutex<MegaCore>>);
+
+    impl Write for MegaChannel {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().burst(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for MegaChannel {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut core = self.0.lock().unwrap();
+            if core.ack == 0 || buf.is_empty() {
+                return Ok(0);
+            }
+            core.ack -= 1;
+            buf[0] = 0x00;
+            Ok(1)
+        }
+    }
+
+    impl CommunicationChannel for MegaChannel {
+        fn set_timeout(&mut self, _timeout: Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clear_input_buffer(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clear_output_buffer(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn try_clone(&self) -> std::io::Result<Box<dyn CommunicationChannel>> {
+            Ok(Box::new(MegaChannel(Arc::clone(&self.0))))
+        }
+        fn bytes_to_read(&mut self) -> std::io::Result<u32> {
+            Ok(self.0.lock().unwrap().ack as u32)
+        }
+    }
+
+    /// One `M` frame carrying a whole 16x16 table, exactly as the pre-fix code
+    /// built it: 7 header bytes plus 256 data bytes.
+    fn oversized_table_frame(page: u16, table: &[u8]) -> Vec<u8> {
+        let mut f = vec![b'M'];
+        f.extend_from_slice(&page.to_be_bytes());
+        f.extend_from_slice(&0u16.to_be_bytes());
+        f.extend_from_slice(&(table.len() as u16).to_be_bytes());
+        f.extend_from_slice(table);
+        f
+    }
+
+    fn speeduino_conn(core: &Arc<Mutex<MegaCore>>) -> Connection {
+        let mut conn = Connection::new(ConnectionConfig::default());
+        conn.channel = Some(Box::new(MegaChannel(Arc::clone(core))));
+        conn.config.auto_burn_on_page_change = false;
+
+        let mut proto = ProtocolSettings::default();
+        proto.blocking_factor = SPEEDUINO_BLOCKING_FACTOR;
+        proto.inter_write_delay = 0;
+        proto.block_read_timeout = 100;
+        proto.page_chunk_write_commands = vec!["M%2i%2o%2c%v".to_string(); 8];
+        proto.page_read_commands = vec!["r%2i%2o%2c".to_string(); 8];
+        // Speeduino's legacy framing puts these fields on the wire big-endian;
+        // the observed corruption bytes (4D 00 02 ...) only decode that way.
+        conn.set_protocol(proto, Endianness::Big);
+        conn.use_modern_protocol = false;
+        conn
+    }
+
+    /// The harness has to be able to see the bug, or the regression test below
+    /// proves nothing. Drive the simulated Mega with the frame the pre-fix code
+    /// actually sent and confirm it reproduces what the bench recorded on
+    /// 18 Aug 2026: six bytes dropped, the next command's header written into
+    /// the ignition table's top row, and the write behind it lost entirely.
+    #[test]
+    fn mega_rx_limit_eats_the_frame_tail_and_the_next_command() {
+        let core = Arc::new(Mutex::new(MegaCore::new()));
+
+        let ignition: Vec<u8> = (0..256u32).map(|i| 40 + (i % 30) as u8).collect();
+        let ve: Vec<u8> = (0..256u32).map(|i| 60 + (i % 40) as u8).collect();
+
+        {
+            let mut c = core.lock().unwrap();
+            c.burst(&oversized_table_frame(1, &ignition)); // 263 bytes
+            c.burst(&oversized_table_frame(2, &ve)); // 263 bytes
+        }
+
+        let c = core.lock().unwrap();
+        assert_eq!(c.bursts, vec![263, 263]);
+        assert_eq!(c.dropped, 12, "6 bytes lost off the tail of each frame");
+
+        // The last six cells of the ignition table hold the next command's
+        // header instead of spark advance: 'M', page 2 big-endian, offset 0,
+        // and the high byte of the 256-byte count. Raw 0x4D, 0x00 and 0x02 are
+        // 37, -40 and -38 degrees once the table's +40 offset comes off — a
+        // detonation-relevant edit nobody asked for, in the 100 kPa row.
+        assert_eq!(&c.page(1)[250..256], &[0x4D, 0x00, 0x02, 0x00, 0x00, 0x01]);
+        assert_ne!(&c.page(1)[250..256], &ignition[250..256]);
+
+        // ...and the VE write never happened at all.
+        assert!(
+            c.page(2).is_empty() || c.page(2)[..256].iter().all(|&b| b == 0),
+            "the following write should have been consumed as table data"
+        );
+    }
+
+    /// The fix: no matter how large a payload a caller hands `write_memory`,
+    /// nothing longer than the Mega can hold reaches the wire, so both tables
+    /// land byte-exact. Reintroducing the bug (dropping the chunking branch in
+    /// `write_memory`) turns this into the corruption pinned above.
+    #[test]
+    fn table_writes_survive_the_mega_rx_limit() {
+        let core = Arc::new(Mutex::new(MegaCore::new()));
+        let mut conn = speeduino_conn(&core);
+
+        let ignition: Vec<u8> = (0..256u32).map(|i| 40 + (i % 30) as u8).collect();
+        let ve: Vec<u8> = (0..256u32).map(|i| 60 + (i % 40) as u8).collect();
+
+        for (page, table) in [(1u8, &ignition), (2u8, &ve)] {
+            conn.write_memory(WriteMemoryParams {
+                can_id: 0,
+                page,
+                offset: 0,
+                data: table.clone(),
+            })
+            .expect("write_memory should succeed");
+        }
+
+        let c = core.lock().unwrap();
+        assert!(
+            c.bursts.iter().all(|&n| n <= MEGA_RX_CAPACITY),
+            "a frame overran the Mega's {MEGA_RX_CAPACITY}-byte buffer: {:?}",
+            c.bursts
+        );
+        assert_eq!(c.dropped, 0, "no byte may be dropped by the ECU ring");
+        assert_eq!(&c.page(1)[..256], &ignition[..], "ignition table corrupted");
+        assert_eq!(&c.page(2)[..256], &ve[..], "VE table lost or corrupted");
     }
 
     #[test]
