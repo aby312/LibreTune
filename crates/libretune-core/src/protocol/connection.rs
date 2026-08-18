@@ -3029,6 +3029,11 @@ mod tests {
             Ok(())
         }
         fn clear_input_buffer(&mut self) -> std::io::Result<()> {
+            // A real port drops whatever is still sitting in RX, and the
+            // command path relies on that: a fire-and-forget write leaves its
+            // unread ack behind, which would otherwise arrive as the first
+            // byte of the next read's payload.
+            self.0.lock().unwrap().out.clear();
             Ok(())
         }
         fn clear_output_buffer(&mut self) -> std::io::Result<()> {
