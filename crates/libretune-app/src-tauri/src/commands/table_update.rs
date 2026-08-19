@@ -14,6 +14,7 @@ pub async fn update_table_data(
     // definition. This is the primary table-cell-edit command (the main
     // table editor calls it on every cell edit), so it's likely the single
     // most frequently invoked path that had this bug.
+    let probe = crate::commands::w2_probe::Probe::new("update_table_data");
     let (constant, endianness, default_page_bytes) = {
         let def_guard = state.definition.lock().await;
         let def = def_guard.as_ref().ok_or("Definition not loaded")?;
@@ -61,7 +62,9 @@ pub async fn update_table_data(
     }
 
     let mut conn_guard = state.connection.lock().await;
+    probe.mark("conn-lock");
     let mut cache_guard = state.tune_cache.lock().await;
+    probe.mark("cache-lock");
 
     // Always write to TuneCache if available (enables offline editing)
     if let Some(cache) = cache_guard.as_mut() {
@@ -110,6 +113,7 @@ pub async fn update_table_data(
         // reached a running engine on 18 Aug 2026 with both writes reported
         // successful. Chunking stops that particular overrun; the read-back is
         // what turns the next silent divergence into a visible error.
+        probe.mark("ecu-write-start");
         match conn.write_memory_verified(params) {
             Ok(()) => {}
             // The ECU is holding something other than what was sent. This is

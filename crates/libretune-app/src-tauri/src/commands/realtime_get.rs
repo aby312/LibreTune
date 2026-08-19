@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub async fn get_realtime_data(
     state: tauri::State<'_, AppState>,
 ) -> Result<HashMap<String, f64>, String> {
+    let _rt_guard = crate::commands::w2_probe::RtGuard::new();
+    let _probe = crate::commands::w2_probe::Probe::quiet("get_realtime_data");
     // Use cached output channels to avoid expensive cloning.
     // IMPORTANT: acquire each lock independently to avoid deadlocks.
     let (channels_arc, endianness) = {

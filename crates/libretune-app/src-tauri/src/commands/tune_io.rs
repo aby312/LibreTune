@@ -62,8 +62,10 @@ pub async fn burn_to_ecu(
     state: tauri::State<'_, AppState>,
     force: Option<bool>,
 ) -> Result<(), String> {
+    let probe = crate::commands::w2_probe::Probe::new("burn_to_ecu");
     if !force.unwrap_or(false) {
         let report = crate::commands::pin_conflicts::scan_pin_conflicts(&state).await?;
+        probe.mark("pin-scan-done");
         if report.has_conflicts() {
             return Err(report.summary());
         }
@@ -73,6 +75,7 @@ pub async fn burn_to_ecu(
     let _ = app.save_window_state(StateFlags::all());
 
     let mut conn_guard = state.connection.lock().await;
+    probe.mark("conn-lock");
     let conn = conn_guard.as_mut().ok_or("Not connected to ECU")?;
 
     // Send burn command to ECU

@@ -8,6 +8,7 @@ pub async fn update_constant(
     name: String,
     value: f64,
 ) -> Result<(), String> {
+    let probe = crate::commands::w2_probe::Probe::new("update_constant");
     // Snapshot only what we need from the definition, then drop the lock before
     // doing any ECU I/O below. Holding `state.definition` across a blocking
     // conn.read_memory()/write_memory() call starves every other command that
@@ -26,6 +27,7 @@ pub async fn update_constant(
         .copied()
         .unwrap_or(256) as usize;
     drop(def_guard);
+    probe.mark("def-snapshot-done");
 
     // Block assigning a pin that another output already uses (rusEFI Settings Error).
     if constant.data_type == libretune_core::ini::DataType::Bits {
@@ -33,7 +35,9 @@ pub async fn update_constant(
     }
 
     let mut conn_guard = state.connection.lock().await;
+    probe.mark("conn-lock");
     let mut cache_guard = state.tune_cache.lock().await;
+    probe.mark("cache-lock");
 
     // PC variables are stored locally, not on ECU
     if constant.is_pc_variable {
