@@ -27,7 +27,7 @@ pub async fn close_project(state: tauri::State<'_, AppState>) -> Result<(), Stri
     *def_guard = None;
 
     // Clear tune
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_mgmt.rs").await;
     *tune_guard = None;
 
     Ok(())
@@ -44,7 +44,7 @@ pub async fn get_current_project(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<CurrentProjectInfo>, String> {
     let proj_guard = state.current_project.lock().await;
-    let tune_modified = *state.tune_modified.lock().await;
+    let tune_modified = *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/project_mgmt.rs").await;
 
     Ok(proj_guard.as_ref().map(|project| CurrentProjectInfo {
         name: project.config.name.clone(),

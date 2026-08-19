@@ -37,11 +37,11 @@ pub async fn set_demo_mode(
             }
         }
         {
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/demo.rs").await;
             *tune_guard = None;
         }
         {
-            let mut tune_mod_guard = state.tune_modified.lock().await;
+            let mut tune_mod_guard = crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/demo.rs").await;
             *tune_mod_guard = false;
         }
 
@@ -131,12 +131,12 @@ pub(crate) async fn apply_demo_enable(
     }
 
     {
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/demo.rs").await;
         *tune_guard = None;
     }
 
     {
-        let mut tune_mod_guard = state.tune_modified.lock().await;
+        let mut tune_mod_guard = crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/demo.rs").await;
         *tune_mod_guard = false;
     }
 

@@ -47,7 +47,7 @@ pub async fn load_ini(
 
             // Get current tune before updating definition (if any)
             let current_tune = {
-                let tune_guard = state.current_tune.lock().await;
+                let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/load_ini.rs").await;
                 tune_guard.as_ref().cloned()
             };
 

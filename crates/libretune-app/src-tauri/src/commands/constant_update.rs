@@ -45,7 +45,7 @@ pub async fn update_constant(
             cache.local_values.insert(name.clone(), value);
         }
         // Also update tune.constants for consistency
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constant_update.rs").await;
         if let Some(tune) = tune_guard.as_mut() {
             tune.constants
                 .insert(name, libretune_core::tune::TuneValue::Scalar(value));
@@ -137,7 +137,7 @@ pub async fn update_constant(
         }
 
         // Update TuneFile in memory (both pages and constants)
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constant_update.rs").await;
         if let Some(tune) = tune_guard.as_mut() {
             // Update page data
             let page_data = tune
@@ -156,7 +156,7 @@ pub async fn update_constant(
         }
 
         // Mark tune as modified
-        *state.tune_modified.lock().await = true;
+        *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/constant_update.rs").await = true;
 
         // Write to ECU if connected
         if let Some(conn) = conn_guard.as_mut() {
@@ -189,7 +189,7 @@ pub async fn update_constant(
     if let Some(cache) = cache_guard.as_mut() {
         if cache.write_bytes(constant.page, constant.offset, &raw_data) {
             // Also update TuneFile in memory
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constant_update.rs").await;
             if let Some(tune) = tune_guard.as_mut() {
                 // Get or create page data
                 let page_data = tune
@@ -210,7 +210,7 @@ pub async fn update_constant(
             }
 
             // Mark tune as modified
-            *state.tune_modified.lock().await = true;
+            *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/constant_update.rs").await = true;
         }
     }
 

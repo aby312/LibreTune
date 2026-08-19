@@ -90,7 +90,7 @@ pub async fn get_constant_string_value(
     drop(def_guard);
 
     let mut conn_guard = state.connection.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constants_read.rs").await;
     let conn = conn_guard.as_mut();
 
     // For string type, read the raw bytes and convert to UTF-8 string
@@ -167,7 +167,7 @@ pub async fn get_constant_value(
 
     let mut conn_guard = state.connection.lock().await;
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constants_read.rs").await;
     let conn = conn_guard.as_mut();
 
     // PC variables are stored locally, not on ECU

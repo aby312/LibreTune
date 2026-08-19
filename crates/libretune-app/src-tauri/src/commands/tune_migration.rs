@@ -25,7 +25,7 @@ pub async fn clear_migration_report(state: tauri::State<'_, AppState>) -> Result
 pub async fn get_tune_ini_metadata(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<IniMetadata>, String> {
-    let tune = state.current_tune.lock().await;
+    let tune = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_migration.rs").await;
     Ok(tune.as_ref().and_then(|t| t.ini_metadata.clone()))
 }
 
@@ -34,6 +34,6 @@ pub async fn get_tune_ini_metadata(
 pub async fn get_tune_constant_manifest(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<Vec<ConstantManifestEntry>>, String> {
-    let tune = state.current_tune.lock().await;
+    let tune = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_migration.rs").await;
     Ok(tune.as_ref().and_then(|t| t.constant_manifest.clone()))
 }

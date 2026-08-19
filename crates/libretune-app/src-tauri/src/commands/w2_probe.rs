@@ -75,3 +75,51 @@ impl Drop for RtGuard {
         REALTIME_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     }
 }
+
+/// Guard wrapper that names any holder of a traced mutex who keeps it longer
+/// than a second — the W2 holder never logs, so make the lock itself talk.
+pub struct HoldGuard<'a, T> {
+    inner: tokio::sync::MutexGuard<'a, T>,
+    name: &'static str,
+    site: &'static str,
+    t0: Instant,
+}
+
+impl<T> std::ops::Deref for HoldGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+impl<T> std::ops::DerefMut for HoldGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+impl<T> Drop for HoldGuard<'_, T> {
+    fn drop(&mut self) {
+        let held = self.t0.elapsed().as_millis() as u64;
+        if held > 1000 {
+            tracing::info!(target: "w2", lock = self.name, site = self.site, held_ms = held, "long hold released");
+        }
+    }
+}
+
+pub async fn hold<'a, T>(
+    m: &'a tokio::sync::Mutex<T>,
+    name: &'static str,
+    site: &'static str,
+) -> HoldGuard<'a, T> {
+    let t0 = Instant::now();
+    let inner = m.lock().await;
+    let waited = t0.elapsed().as_millis() as u64;
+    if waited > 1000 {
+        tracing::info!(target: "w2", lock = name, site, waited_ms = waited, "slow acquire");
+    }
+    HoldGuard {
+        inner,
+        name,
+        site,
+        t0: Instant::now(),
+    }
+}

@@ -223,7 +223,7 @@ pub async fn apply_base_map(
     // Acquire cache and tune locks
     let mut cache_guard = state.tune_cache.lock().await;
     let cache = cache_guard.as_mut().ok_or("Tune cache not initialized")?;
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/apply_base_map.rs").await;
     // Create an empty TuneFile if none exists (e.g. new project with no imported tune)
     if tune_guard.is_none() {
         let sig = def.signature.clone();
@@ -376,7 +376,7 @@ pub async fn apply_base_map(
     }
 
     // Mark tune as modified
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/apply_base_map.rs").await = true;
 
     // Auto-save the tune to the project directory so it exists on disk.
     // This is critical for new projects that had no tune file — without this,
@@ -399,7 +399,7 @@ pub async fn apply_base_map(
                 // Update the current tune path so future operations find it
                 drop(project_guard);
                 *state.current_tune_path.lock().await = Some(tune_path);
-                *state.tune_modified.lock().await = false;
+                *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/apply_base_map.rs").await = false;
             }
         }
     }

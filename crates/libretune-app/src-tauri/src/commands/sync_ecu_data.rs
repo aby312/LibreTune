@@ -67,7 +67,7 @@ async fn restore_baseline_pages(state: &AppState, baseline: &HashMap<u8, Vec<u8>
         for (page_num, data) in baseline {
             tune.pages.insert(*page_num, data.clone());
         }
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/sync_ecu_data.rs").await;
         *tune_guard = Some(tune);
     }
 }
@@ -87,7 +87,7 @@ pub async fn sync_ecu_data(
     let total_bytes: usize = page_sizes.iter().map(|&s| s as usize).sum();
     drop(def_guard);
 
-    let was_modified = *state.tune_modified.lock().await;
+    let was_modified = *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/sync_ecu_data.rs").await;
 
     // Compare against the in-memory tune cache (authoritative editing state),
     // not the raw TuneFile which may have empty pages for MSQ-based projects.
@@ -197,13 +197,13 @@ pub async fn sync_ecu_data(
                 cache.load_page(*page_num, page_data.clone());
             }
         }
-        *state.tune_modified.lock().await = true;
+        *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/sync_ecu_data.rs").await = true;
     }
 
     // Store tune file in state (even if partial)
     let ecu_tune = tune.clone();
     {
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/sync_ecu_data.rs").await;
         *tune_guard = Some(tune);
     }
 
@@ -269,7 +269,7 @@ pub async fn sync_ecu_data(
     } else if pages_failed == 0 {
         // Keep dirty if we repaired size scalars — user should burn once to persist.
         if size_scalars_patched == 0 {
-            *state.tune_modified.lock().await = false;
+            *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/sync_ecu_data.rs").await = false;
         }
         *state.tune_mismatch_snapshot.lock().await = None;
         // Keep cache as ECU pages (authoritative after a clean match).

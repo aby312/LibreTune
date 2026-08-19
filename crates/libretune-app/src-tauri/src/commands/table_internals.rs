@@ -114,7 +114,7 @@ pub(crate) async fn get_table_data_internal(
     drop(def_guard);
 
     // Read from tune file (offline mode)
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/table_internals.rs").await;
 
     fn read_const_values(
         constant: &Constant,
@@ -228,7 +228,7 @@ pub(crate) async fn get_table_data_internal(
 
     let string_ctx = build_string_context(state).await;
     let numeric = {
-        let tune = state.current_tune.lock().await;
+        let tune = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/table_internals.rs").await;
         numeric_context_from_tune(tune.as_ref())
     };
 
@@ -355,7 +355,7 @@ pub(crate) async fn update_table_z_values_internal(
     if let Some(cache) = cache_guard.as_mut() {
         if cache.write_bytes(constant.page, constant.offset, &raw_data) {
             // Also update TuneFile in memory
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/table_internals.rs").await;
             if let Some(tune) = tune_guard.as_mut() {
                 let page_data = tune
                     .pages
@@ -378,7 +378,7 @@ pub(crate) async fn update_table_z_values_internal(
                     libretune_core::tune::TuneValue::Array(flat_values.clone()),
                 );
             }
-            *state.tune_modified.lock().await = true;
+            *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/table_internals.rs").await = true;
         }
     }
 
@@ -482,7 +482,7 @@ pub(crate) async fn update_constant_array_internal(
 
     if let Some(cache) = cache_guard.as_mut() {
         if cache.write_bytes(constant.page, constant.offset, &raw_data) {
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/table_internals.rs").await;
             if let Some(tune) = tune_guard.as_mut() {
                 let page_data = tune
                     .pages
@@ -505,7 +505,7 @@ pub(crate) async fn update_constant_array_internal(
                 );
             }
 
-            *state.tune_modified.lock().await = true;
+            *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/table_internals.rs").await = true;
         }
     }
 

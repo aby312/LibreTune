@@ -50,7 +50,7 @@ pub async fn create_project(
 
     // Always initialize current_tune so base map apply and other operations work
     {
-        let mut tune_guard = state.current_tune.lock().await;
+        let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_lifecycle.rs").await;
         if tune_guard.is_none() {
             *tune_guard = Some(TuneFile::new(&signature));
         }
@@ -634,7 +634,7 @@ pub async fn open_project(
         drop(cache_guard);
 
         // Store tune in state
-        *state.current_tune.lock().await = Some(tune.clone());
+        *crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_lifecycle.rs").await = Some(tune.clone());
         *state.current_tune_path.lock().await = Some(project_path.join("CurrentTune.msq"));
 
         // Emit event to notify UI that tune was loaded

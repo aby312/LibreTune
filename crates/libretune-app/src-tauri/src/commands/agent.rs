@@ -366,7 +366,7 @@ impl LiveReadExecutor {
 
         // 2. Read the current value from the loaded tune if present.
         let current: Option<f64> = {
-            let tune_guard = state.current_tune.lock().await;
+            let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/agent.rs").await;
             match tune_guard.as_ref().and_then(|tune| tune.get_value(name)) {
                 Some(TuneValue::Scalar(f)) => Some(*f),
                 Some(TuneValue::Bool(b)) => Some(if *b { 1.0 } else { 0.0 }),
@@ -566,7 +566,7 @@ pub async fn agent_apply_proposals(
     //    command validates + signals intent; it does not itself write to
     //    tune state, to avoid duplicating the page-write path).
     if any_applied {
-        let mut modified = state.tune_modified.lock().await;
+        let mut modified = crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/agent.rs").await;
         *modified = true;
     }
 

@@ -592,9 +592,9 @@ pub async fn load_tune(
         }
     }
 
-    *state.current_tune.lock().await = Some(tune.clone());
+    *crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/load_tune.rs").await = Some(tune.clone());
     *state.current_tune_path.lock().await = Some(PathBuf::from(path));
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/load_tune.rs").await = false;
 
     // If a project is open, save the tune to the project's CurrentTune.msq
     // This ensures it will be auto-loaded next time the project is opened

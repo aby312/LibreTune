@@ -332,7 +332,7 @@ async fn wue_slot(state: &AppState, write: Option<u8>) -> Result<u8, String> {
     if let Some(cache) = cache_guard.as_mut() {
         cache.write_bytes(page, offset, &[value]);
     }
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/afr_delay_test.rs").await;
     if let Some(tune) = tune_guard.as_mut() {
         if let Some(page_data) = tune.pages.get_mut(&page) {
             if (offset as usize) < page_data.len() {

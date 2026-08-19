@@ -17,9 +17,9 @@ pub struct TuneInfo {
 /// Returns: TuneInfo with path, signature, and modification status
 #[tauri::command]
 pub async fn get_tune_info(state: tauri::State<'_, AppState>) -> Result<TuneInfo, String> {
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_info.rs").await;
     let path_guard = state.current_tune_path.lock().await;
-    let modified = *state.tune_modified.lock().await;
+    let modified = *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_info.rs").await;
 
     match &*tune_guard {
         Some(tune) => Ok(TuneInfo {
@@ -47,9 +47,9 @@ pub async fn new_tune(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
     let tune = TuneFile::new(&signature);
 
-    *state.current_tune.lock().await = Some(tune);
+    *crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_info.rs").await = Some(tune);
     *state.current_tune_path.lock().await = None;
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_info.rs").await = false;
 
     Ok(())
 }

@@ -198,7 +198,7 @@ pub async fn build_string_context_filtered(
     filter: NameFilter<'_>,
 ) -> StringContext {
     let def_guard = state.definition.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/string_context.rs").await;
     let project_guard = state.current_project.lock().await;
     let conn_guard = state.connection.lock().await;
     let demo = *state.demo_mode.lock().await;

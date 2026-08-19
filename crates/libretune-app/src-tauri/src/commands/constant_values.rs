@@ -21,7 +21,7 @@ pub async fn get_all_constant_values(
 
     // NO connection lock! Read from cache/tune only.
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/constant_values.rs").await;
 
     Ok(collect_scalar_constant_values(
         def,

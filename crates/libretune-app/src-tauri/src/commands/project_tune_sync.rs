@@ -6,7 +6,7 @@ use tokio::time::{sleep, Duration};
 
 #[tauri::command]
 pub async fn mark_tune_modified(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/project_tune_sync.rs").await = true;
     Ok(())
 }
 
@@ -16,7 +16,7 @@ pub async fn mark_tune_modified(state: tauri::State<'_, AppState>) -> Result<(),
 pub async fn compare_project_and_ecu_tunes(
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_tune_sync.rs").await;
     let project_guard = state.current_project.lock().await;
 
     // Get ECU tune (synced from ECU, currently in current_tune)
@@ -152,14 +152,14 @@ pub async fn write_project_tune_to_ecu(
         }
     }
 
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_tune_sync.rs").await;
     *tune_guard = Some(tune);
 
     // Update path to project tune file
     *state.current_tune_path.lock().await = Some(tune_path);
 
     // Mark as not modified (freshly loaded from project)
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/project_tune_sync.rs").await = false;
 
     Ok(())
 }
@@ -179,7 +179,7 @@ pub async fn save_tune_to_project(state: tauri::State<'_, AppState>) -> Result<(
 
     // Sync cache pages into the in-memory tune before writing disk.
     let mut tune = {
-        let tune_guard = state.current_tune.lock().await;
+        let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_tune_sync.rs").await;
         tune_guard.as_ref().ok_or("No tune loaded")?.clone()
     };
     {
@@ -199,9 +199,9 @@ pub async fn save_tune_to_project(state: tauri::State<'_, AppState>) -> Result<(
     tune.save(&tune_path)
         .map_err(|e| format!("Failed to save tune to project: {}", e))?;
 
-    *state.current_tune.lock().await = Some(tune);
+    *crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/project_tune_sync.rs").await = Some(tune);
     *state.current_tune_path.lock().await = Some(tune_path);
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/project_tune_sync.rs").await = false;
 
     Ok(())
 }

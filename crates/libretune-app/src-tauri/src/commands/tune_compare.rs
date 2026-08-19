@@ -29,7 +29,7 @@ pub async fn merge_from_tune(
     // upfront even though cache/def are only used conditionally below.
     let def_guard = state.definition.lock().await;
     let mut cache_guard = state.tune_cache.lock().await;
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_compare.rs").await;
     let tune = tune_guard.as_mut().ok_or("No tune loaded")?;
 
     let merged = TuneDiff::merge_selected(tune, &source, &constant_names);

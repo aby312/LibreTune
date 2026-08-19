@@ -14,7 +14,7 @@ pub async fn save_tune(
     // deadlock against e.g. get_table_data/get_all_constant_values).
     let def_guard = state.definition.lock().await;
     let cache_guard = state.tune_cache.lock().await;
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/save_tune.rs").await;
     let path_guard = state.current_tune_path.lock().await;
 
     let tune = tune_guard.as_mut().ok_or("No tune loaded")?;
@@ -216,7 +216,7 @@ pub async fn save_tune(
     drop(def_guard);
 
     *state.current_tune_path.lock().await = Some(save_path.clone());
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/save_tune.rs").await = false;
 
     Ok(save_path.to_string_lossy().to_string())
 }

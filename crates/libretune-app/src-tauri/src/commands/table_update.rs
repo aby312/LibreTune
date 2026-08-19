@@ -70,7 +70,7 @@ pub async fn update_table_data(
     if let Some(cache) = cache_guard.as_mut() {
         if cache.write_bytes(constant.page, constant.offset, &raw_data) {
             // Also update TuneFile in memory
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/table_update.rs").await;
             if let Some(tune) = tune_guard.as_mut() {
                 // Get or create page data
                 let page_data = tune
@@ -94,7 +94,7 @@ pub async fn update_table_data(
             }
 
             // Mark tune as modified
-            *state.tune_modified.lock().await = true;
+            *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/table_update.rs").await = true;
         }
     }
 

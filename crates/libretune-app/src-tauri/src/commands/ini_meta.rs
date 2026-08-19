@@ -112,7 +112,7 @@ pub async fn get_frontpage(
 ) -> Result<Option<FrontPageInfo>, String> {
     let string_ctx = build_string_context(&state).await;
     let numeric = {
-        let tune = state.current_tune.lock().await;
+        let tune = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/ini_meta.rs").await;
         numeric_context_from_tune(tune.as_ref())
     };
 
@@ -220,7 +220,7 @@ pub async fn get_gauge_configs(
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
     // Same lock order as get_all_constant_values: definition → cache → tune.
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/ini_meta.rs").await;
     let ctx = gauge_expr_context(def, tune_guard.as_ref(), cache_guard.as_ref());
 
     let gauges: Vec<GaugeInfo> = def
@@ -249,7 +249,7 @@ pub async fn get_gauge_config(
 
     // Same lock order as get_all_constant_values: definition → cache → tune.
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/ini_meta.rs").await;
     let ctx = gauge_expr_context(def, tune_guard.as_ref(), cache_guard.as_ref());
 
     Ok(gauge_to_info(gauge, &ctx, &string_ctx))

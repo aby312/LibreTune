@@ -11,7 +11,7 @@ use crate::state::AppState;
 pub async fn reset_tune_to_defaults(state: tauri::State<'_, AppState>) -> Result<u32, String> {
     let def_guard = state.definition.lock().await;
     let mut cache_guard = state.tune_cache.lock().await;
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/csv_io.rs").await;
 
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
     let cache = cache_guard.as_mut().ok_or("Tune cache not loaded")?;
@@ -84,7 +84,7 @@ pub async fn export_tune_as_csv(
 ) -> Result<u32, String> {
     let def_guard = state.definition.lock().await;
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/csv_io.rs").await;
 
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
 
@@ -235,7 +235,7 @@ pub async fn import_tune_from_csv(
 ) -> Result<u32, String> {
     let def_guard = state.definition.lock().await;
     let mut cache_guard = state.tune_cache.lock().await;
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/csv_io.rs").await;
 
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
     let cache = cache_guard.as_mut().ok_or("Tune cache not loaded")?;

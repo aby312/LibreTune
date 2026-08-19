@@ -27,7 +27,7 @@ pub async fn create_restore_point(
     // Sync the project's tune from the authoritative in-memory tune before
     // snapshotting so the restore point reflects what the user actually has —
     // the same source `save_tune` writes to CurrentTune.msq.
-    let current = state.current_tune.lock().await.clone();
+    let current = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/restore_points.rs").await.clone();
 
     let mut proj_guard = state.current_project.lock().await;
     let project = proj_guard
@@ -129,7 +129,7 @@ pub async fn load_restore_point(
     // Keep the in-memory project's tune in sync with what was just loaded, so
     // project-level flows (save_tune_to_project, use_project_tune) see the
     // restored tune rather than the pre-restore one.
-    let restored = state.current_tune.lock().await.clone();
+    let restored = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/restore_points.rs").await.clone();
     if let Some(tune) = restored {
         let mut proj_guard = state.current_project.lock().await;
         if let Some(project) = proj_guard.as_mut() {
@@ -140,7 +140,7 @@ pub async fn load_restore_point(
     // A restored tune differs from what the ECU is running until the user
     // writes/burns it; load_tune resets tune_modified to false, which would
     // hide that.
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/restore_points.rs").await = true;
 
     Ok(())
 }

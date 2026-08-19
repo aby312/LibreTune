@@ -191,7 +191,7 @@ pub async fn git_checkout(
     .await?;
 
     // The restored tune is not what the ECU is running until written/burned.
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/git.rs").await = true;
 
     Ok(())
 }
@@ -266,7 +266,7 @@ pub async fn git_switch_branch(
     )
     .await?;
 
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/git.rs").await = true;
 
     Ok(())
 }

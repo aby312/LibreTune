@@ -61,7 +61,7 @@ pub async fn update_constant_string(
     }
 
     // Update TuneFile in memory
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_misc.rs").await;
     if let Some(tune) = tune_guard.as_mut() {
         let page_data = tune
             .pages
@@ -79,7 +79,7 @@ pub async fn update_constant_string(
     }
 
     // Mark tune as modified
-    *state.tune_modified.lock().await = true;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_misc.rs").await = true;
 
     // Write to ECU if connected
     let mut conn_guard = state.connection.lock().await;
@@ -136,7 +136,7 @@ pub async fn use_project_tune(
         if let Some(snapshot) = snapshot_guard.as_ref() {
             snapshot.ecu_pages.clone()
         } else {
-            let tune_guard = state.current_tune.lock().await;
+            let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_misc.rs").await;
             tune_guard
                 .as_ref()
                 .map(|t| t.pages.clone())
@@ -172,9 +172,9 @@ pub async fn use_project_tune(
         .save(&tune_path)
         .map_err(|e| format!("Failed to save project tune: {}", e))?;
 
-    *state.current_tune.lock().await = Some(project_msq);
+    *crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_misc.rs").await = Some(project_msq);
     *state.current_tune_path.lock().await = Some(tune_path);
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_misc.rs").await = false;
     *state.tune_mismatch_snapshot.lock().await = None;
 
     let _ = app.emit("tune:loaded", "project");
@@ -248,7 +248,7 @@ pub async fn use_ecu_tune(
             }
             drop(cache_guard);
 
-            let mut tune_guard = state.current_tune.lock().await;
+            let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/tune_misc.rs").await;
             if let Some(tune) = tune_guard.as_mut() {
                 tune.pages = snapshot.ecu_pages.clone();
                 if !ini_signature.is_empty() {
@@ -262,7 +262,7 @@ pub async fn use_ecu_tune(
         }
     }
 
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_misc.rs").await = false;
     *state.tune_mismatch_snapshot.lock().await = None;
 
     let has_project = state.current_project.lock().await.is_some();

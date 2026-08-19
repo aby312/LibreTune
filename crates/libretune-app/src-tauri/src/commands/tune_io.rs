@@ -83,7 +83,7 @@ pub async fn burn_to_ecu(
     conn.send_burn_command()
         .map_err(|e| format!("Burn failed: {}", e))?;
 
-    *state.tune_modified.lock().await = false;
+    *crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/tune_io.rs").await = false;
 
     Ok(())
 }

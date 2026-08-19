@@ -32,7 +32,7 @@ pub async fn set_annotation(
         tag: annotation_tag,
     };
 
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/annotations.rs").await;
     let tune = tune_guard.as_mut().ok_or("No tune loaded")?;
     tune.set_annotation(key, annotation);
 
@@ -44,7 +44,7 @@ pub async fn get_annotation(
     state: tauri::State<'_, AppState>,
     key: String,
 ) -> Result<Option<TuneAnnotation>, String> {
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/annotations.rs").await;
     let tune = tune_guard.as_ref().ok_or("No tune loaded")?;
     Ok(tune.get_annotation(&key).cloned())
 }
@@ -54,7 +54,7 @@ pub async fn get_table_annotations(
     state: tauri::State<'_, AppState>,
     table_name: String,
 ) -> Result<Vec<(String, TuneAnnotation)>, String> {
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/annotations.rs").await;
     let tune = tune_guard.as_ref().ok_or("No tune loaded")?;
     let annotations = tune
         .get_table_annotations(&table_name)
@@ -69,7 +69,7 @@ pub async fn delete_annotation(
     state: tauri::State<'_, AppState>,
     key: String,
 ) -> Result<bool, String> {
-    let mut tune_guard = state.current_tune.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/annotations.rs").await;
     let tune = tune_guard.as_mut().ok_or("No tune loaded")?;
     Ok(tune.delete_annotation(&key))
 }
@@ -78,7 +78,7 @@ pub async fn delete_annotation(
 pub async fn get_all_annotations(
     state: tauri::State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, TuneAnnotation>, String> {
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/annotations.rs").await;
     let tune = tune_guard.as_ref().ok_or("No tune loaded")?;
     Ok(tune.all_annotations().clone())
 }

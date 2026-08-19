@@ -217,7 +217,7 @@ pub async fn get_curve_data(
     // by every write path (get_constant_value, update_constant, etc.) — the
     // reverse order deadlocks against those.
     let mut conn_guard = state.connection.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/curve_ops.rs").await;
     let mut conn = conn_guard.as_mut();
 
     let x_bins = read_const_from_source(&x_const, tune_guard.as_ref(), &mut conn, endianness)?;
@@ -386,8 +386,8 @@ pub async fn update_curve_data(
 
     let mut conn_guard = state.connection.lock().await;
     let mut cache_guard = state.tune_cache.lock().await;
-    let mut tune_guard = state.current_tune.lock().await;
-    let mut modified_guard = state.tune_modified.lock().await;
+    let mut tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/curve_ops.rs").await;
+    let mut modified_guard = crate::commands::w2_probe::hold(&state.tune_modified, "tune_modified", "commands/curve_ops.rs").await;
 
     let cache = cache_guard
         .as_mut()

@@ -210,7 +210,7 @@ async fn build_plugin_data_snapshot(state: &tauri::State<'_, AppState>) -> Plugi
     };
     let mut constants = HashMap::new();
     {
-        let tune_guard = state.current_tune.lock().await;
+        let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/wasm_plugin.rs").await;
         if let Some(tune) = tune_guard.as_ref() {
             for name in &constant_names {
                 match tune.get_value(name) {

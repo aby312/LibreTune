@@ -11,7 +11,7 @@ pub(crate) async fn scan_pin_conflicts(state: &AppState) -> Result<PinConflictRe
     let def_guard = state.definition.lock().await;
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/pin_conflicts.rs").await;
     let endianness = def.endianness;
 
     Ok(detect_pin_conflicts(def, |name, constant| {
@@ -43,7 +43,7 @@ pub(crate) async fn deny_if_pin_conflict(
     let def_guard = state.definition.lock().await;
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
     let cache_guard = state.tune_cache.lock().await;
-    let tune_guard = state.current_tune.lock().await;
+    let tune_guard = crate::commands::w2_probe::hold(&state.current_tune, "current_tune", "commands/pin_conflicts.rs").await;
     let endianness = def.endianness;
     let new_index = value as usize;
 
