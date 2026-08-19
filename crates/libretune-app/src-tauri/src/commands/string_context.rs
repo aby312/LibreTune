@@ -200,9 +200,23 @@ pub async fn build_string_context_filtered(
     let def_guard = state.definition.lock().await;
     let tune_guard = state.current_tune.lock().await;
     let project_guard = state.current_project.lock().await;
-    let conn_guard = state.connection.lock().await;
     let demo = *state.demo_mode.lock().await;
     let streaming = state.streaming_task.lock().await.is_some();
+
+    // The connection is consulted for exactly one boolean, so never wait on
+    // its mutex here. This context builds while table writes hold the
+    // connection for seconds (paced, verified serial I/O), and blocking on it
+    // with `current_tune` held deadlocks those writes — they hold the
+    // connection and then take `current_tune` — until something tears one
+    // side down. A busy connection mutex means serial I/O is in flight,
+    // which is itself proof of "online".
+    let conn_online = match state.connection.try_lock() {
+        Ok(g) => g
+            .as_ref()
+            .map(|c| c.state() == ConnectionState::Connected)
+            .unwrap_or(false),
+        Err(_) => true,
+    };
 
     let string_values = string_map_from_tune(tune_guard.as_ref(), def_guard.as_ref(), filter);
     let bit_options = bit_options_map(def_guard.as_ref(), filter);
@@ -216,16 +230,11 @@ pub async fn build_string_context_filtered(
         .map(|p| p.path.display().to_string())
         .unwrap_or_default();
 
-    let is_online = demo && streaming
-        || conn_guard
-            .as_ref()
-            .map(|c| c.state() == ConnectionState::Connected)
-            .unwrap_or(false);
+    let is_online = demo && streaming || conn_online;
 
     let start_time = state.app_start_epoch;
     let cache = Arc::clone(&state.inc_table_cache);
 
-    drop(conn_guard);
     drop(project_guard);
     drop(tune_guard);
     drop(def_guard);

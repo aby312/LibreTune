@@ -336,6 +336,42 @@ mod concurrency_tests {
 
         writer.await.expect("writer task panicked");
     }
+
+    /// `build_string_context_filtered` used to `lock().await` the connection
+    /// while holding `current_tune` — the reverse order of every table and
+    /// constant writer, which holds the connection through seconds of paced
+    /// serial I/O and then takes `current_tune`. On the bench that AB-BA
+    /// deadlocked ~1/3 of write cycles for as long as nothing tore one side
+    /// down (the W2 ~90 s stall). The builder now try_locks the connection,
+    /// so it must complete while a writer-shaped task holds the connection
+    /// and then takes the tune lock. Reintroduce the blocking acquire and
+    /// this test times out.
+    #[tokio::test]
+    async fn string_context_builds_while_a_writer_holds_the_connection() {
+        let state = build_state_for_lock_tests();
+
+        let s1 = state.clone();
+        let writer = tokio::spawn(async move {
+            let _conn = s1.connection.lock().await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _tune = s1.current_tune.lock().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        // Let the writer take the connection first.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let built = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::commands::string_context::build_string_context_filtered(&state, None),
+        )
+        .await;
+        assert!(
+            built.is_ok(),
+            "context build deadlocked against a connection-holding writer"
+        );
+        let _ = writer.await;
+    }
 }
 
 // New tests for signature comparison and normalization (unit tests)
