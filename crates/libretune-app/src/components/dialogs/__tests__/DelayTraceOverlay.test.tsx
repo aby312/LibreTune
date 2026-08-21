@@ -74,4 +74,62 @@ describe('DelayTraceOverlay', () => {
     render(<DelayTraceOverlay traces={[flat]} />);
     expect(screen.getByText(/not enough movement/)).toBeInTheDocument();
   });
+
+  it('draws pulse width on its own scale without disturbing the AFR reading', () => {
+    // The fixture steps PW 1.65 -> 1.75, i.e. +0.10 ms above the pre-step
+    // baseline. PW is milliseconds and AFR is AFR, so it needs a separate
+    // scale; the label states the peak so the amber line is readable.
+    const traces = [0, 7, 13, 21, 33].map((phase, i) => ramp(i + 1, 100, 200, 1.0, phase));
+    const { container } = render(<DelayTraceOverlay traces={traces} />);
+
+    const pw = container.querySelectorAll('path.delay-overlay-pw');
+    expect(pw.length).toBe(traces.length);
+    expect(screen.getByText(/PW \+0\.10ms/)).toBeTruthy();
+
+    // The line must actually track the step, not sit flat: collapse the scale
+    // and this is the only assertion that notices.
+    const ys = [...(pw[0].getAttribute('d') ?? '').matchAll(/[ML][\d.]+,([\d.]+)/g)]
+      .map((m) => Number(m[1]));
+    expect(ys.length).toBeGreaterThan(5);
+    expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(10);
+
+    // The delay must still be read from AFR alone.
+    const ms = Number(screen.getByText(/usable of/).textContent?.match(/(\d+)\s*ms/)?.[1]);
+    expect(ms).toBeGreaterThan(170);
+    expect(ms).toBeLessThan(230);
+  });
+
+  it('omits the pulse-width layer when no trace carries pw', () => {
+    const bare: DelayTrace = {
+      step: 1,
+      unusable: false,
+      points: Array.from({ length: 40 }, (_, i) => ({
+        tMs: -400 + i * 49,
+        afr: i > 12 ? 13.7 : 14.7,
+      })),
+    };
+    const { container } = render(<DelayTraceOverlay traces={[bare]} />);
+    expect(container.querySelectorAll('path.delay-overlay-pw').length).toBe(0);
+    expect(screen.queryByText(/PW \+/)).toBeNull();
+  });
+
+  it('does not blame the settle-window traces on fuel cut', () => {
+    // A recovery trace starts after the step, so it has no pre-step baseline
+    // and cannot be drawn. It must not appear in the denominator, and must
+    // not be attributed to fuel cut or throttle movement.
+    const good = ramp(1, 100, 200, 1.0);
+    const recovery: DelayTrace = {
+      step: 1,
+      unusable: false,
+      points: Array.from({ length: 20 }, (_, i) => ({
+        tMs: 3000 + i * 49,
+        afr: 13.7 + i * 0.05,
+        pw: 1.65,
+      })),
+    };
+    render(<DelayTraceOverlay traces={[good, recovery]} />);
+    const summary = screen.getByText(/usable of/).textContent ?? '';
+    expect(summary).toMatch(/1 usable of 1/);
+    expect(summary).not.toMatch(/fuel cut/);
+  });
 });

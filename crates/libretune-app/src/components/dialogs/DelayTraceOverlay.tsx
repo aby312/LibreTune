@@ -140,6 +140,31 @@ export const DelayTraceOverlay: React.FC<Props> = ({ traces }) => {
       .map((p, i) => `${i ? 'L' : 'M'}${x(p.tMs).toFixed(1)},${y(p.afr).toFixed(1)}`)
       .join(' ');
 
+  // Pulse width rides along underneath, on its own scale. The delay is read
+  // from where AFR moves relative to where the FUEL moved, and those are not
+  // the same instant — seeing the commanded step next to the measured
+  // response is what makes a mis-anchored trace obvious by eye.
+  //
+  // Baseline-subtracted milliseconds share the AFR zero line (both are
+  // deltas from the pre-step baseline), and the largest excursion in view
+  // sets the scale, so a 0.16 ms step off a 2 ms pulse is still legible.
+  const drawable = traces.filter((t) => t.points.some((p) => p.tMs < 0));
+  const pwTraces = drawable
+    .map((t) => normalise(t.points).filter((p) => p.pw != null))
+    .filter((pts) => pts.length > 1);
+  const pwPeak = Math.max(
+    0,
+    ...pwTraces.flatMap((pts) => pts.map((p) => Math.abs(p.pw as number))),
+  );
+  // 0.9 keeps the tallest excursion just inside the plot area.
+  const yPw = (v: number) =>
+    pwPeak > 0 ? y(0) - (v / pwPeak) * (y(0) - PAD.t) * 0.9 : y(0);
+  const pwPath = (pts: TracePoint[]) =>
+    pts
+      .filter((p) => p.tMs >= T_MIN && p.tMs <= T_MAX)
+      .map((p, i) => `${i ? 'L' : 'M'}${x(p.tMs).toFixed(1)},${yPw(p.pw as number).toFixed(1)}`)
+      .join(' ');
+
   const medPath = grid
     .map((t, i) => (Number.isNaN(med[i]) ? null : `${x(t).toFixed(1)},${y(med[i]).toFixed(1)}`))
     .filter(Boolean)
@@ -162,7 +187,12 @@ export const DelayTraceOverlay: React.FC<Props> = ({ traces }) => {
         <line x1={x(0)} y1={PAD.t} x2={x(0)} y2={H - PAD.b} className="delay-overlay-step" />
         <line x1={PAD.l} y1={y(0)} x2={W - PAD.r} y2={y(0)} className="delay-overlay-zero" />
 
-        {traces.filter((t) => t.points.some((p) => p.tMs < 0)).map((t) => (
+        {pwPeak > 0 &&
+          pwTraces.map((pts, i) => (
+            <path key={`pw-${i}`} d={pwPath(pts)} className="delay-overlay-pw" />
+          ))}
+
+        {drawable.map((t) => (
           <path
             key={t.step}
             d={path(normalise(t.points))}
@@ -197,12 +227,21 @@ export const DelayTraceOverlay: React.FC<Props> = ({ traces }) => {
             {a}
           </text>
         ))}
+        {pwPeak > 0 && (
+          <text x={W - PAD.r + 4} y={PAD.t + 10} className="delay-overlay-pw-label">
+            PW +{pwPeak.toFixed(2)}ms
+          </text>
+        )}
       </svg>
 
       <p className="delay-overlay-summary">
-        {usableCount} usable of {traces.length}
-        {traces.length - usableCount > 0 &&
-          ` (${traces.length - usableCount} during fuel cut or throttle movement)`}
+        {/* Count only traces that could ever have been drawn. Recovery traces
+            from the settle window have no pre-step baseline, so they are
+            excluded for that reason and not for anything the driver did —
+            counting them here reported "2 during fuel cut" on a clean run. */}
+        {usableCount} usable of {drawable.length}
+        {drawable.length - usableCount > 0 &&
+          ` (${drawable.length - usableCount} during fuel cut or throttle movement)`}
         {delayMs != null ? (
           <>
             {' — '}
