@@ -261,14 +261,26 @@ pub async fn send_autotune_recommendations(
     table_name: String,
 ) -> Result<(), String> {
     // Collect recommendations
-    let (secondary_name, session_signature) = {
+    let (primary_name, secondary_name, session_signature) = {
         let config_guard = state.autotune_config.lock().await;
         let config = config_guard.as_ref();
         (
+            config.map(|c| c.table_name.clone()),
             config.and_then(|c| c.secondary_table_name.clone()),
             config.map(|c| c.definition_signature.clone()),
         )
     };
+
+    // Recommendations are indexed by cell for the session's tables only; writing
+    // them into any other table would corrupt it.
+    if primary_name.as_deref() != Some(table_name.as_str())
+        && secondary_name.as_deref() != Some(table_name.as_str())
+    {
+        return Err(format!(
+            "Table {} is not part of the AutoTune session",
+            table_name
+        ));
+    }
 
     let recs = if matches!(
         (Some(table_name.as_str()), secondary_name.as_deref()),
