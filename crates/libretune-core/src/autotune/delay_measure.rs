@@ -190,7 +190,7 @@ pub fn detect_delay(
 
     // 1. Did anything happen at all? The noise-threshold crossing answers that
     //    and gives the historical leading-edge figure for comparison.
-    let (leading_ms, _) =
+    let (leading_ms, edge) =
         first_crossing(post, baseline - threshold).ok_or(DelayRejection::NoResponse)?;
 
     // A crossing at or before the anchor is not a fast delay, it is a
@@ -235,8 +235,18 @@ pub fn detect_delay(
     // 3. The delay is where the response reaches half its settled size. A step
     //    response is the CDF of transit times, so the half-height is the
     //    median transit; the leading edge is only the fastest path.
-    let (half_ms, _) = first_crossing(post, baseline - excursion / 2.0)
+    //    Search from just before the leading edge (keeps the interpolation
+    //    sample): earlier samples are pre-step drift, which the half level can
+    //    reach when threshold <= excursion < 2*threshold.
+    let from = post
+        .iter()
+        .position(|s| s.t_ms >= edge.t_ms)
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let (half_ms, _) = first_crossing(&post[from..], baseline - excursion / 2.0)
         .ok_or(DelayRejection::ResponseNotSettled)?;
+    // The half crossing cannot precede the leading edge.
+    let half_ms = half_ms.max(leading_ms);
     if half_ms <= anchor_ms as f64 {
         return Err(DelayRejection::ResponsePrecedesStep);
     }
@@ -393,6 +403,36 @@ mod tests {
             detect_delay(240, &pre, &post),
             Err(DelayRejection::ResponsePrecedesStep),
             "a response at the step instant has no transport delay to report"
+        );
+    }
+
+    /// Pre-step drift that dips below the half level (but not the trigger)
+    /// must not be taken as the half-excursion crossing: the delay cannot be
+    /// shorter than the leading edge.
+    #[test]
+    fn half_crossing_ignores_pre_step_drift() {
+        let pre = trace(&[(0, 14.70), (60, 14.70), (120, 14.70), (180, 14.70)]);
+        // threshold 0.15, excursion 0.225 (1.5x): half level 14.5875, trigger 14.55.
+        let post = trace(&[
+            (240, 14.70),
+            (300, 14.58),
+            (360, 14.58),
+            (420, 14.70),
+            (480, 14.70),
+            (540, 14.50),
+            (600, 14.475),
+            (660, 14.475),
+            (720, 14.475),
+            (780, 14.475),
+            (840, 14.475),
+            (900, 14.475),
+        ]);
+        let m = detect_delay(240, &pre, &post).expect("should measure");
+        assert!(
+            m.delay_ms >= m.leading_edge_ms,
+            "delay {:.0} ms precedes leading edge {:.0} ms",
+            m.delay_ms,
+            m.leading_edge_ms
         );
     }
 
