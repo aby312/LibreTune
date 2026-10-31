@@ -1763,10 +1763,11 @@ impl Connection {
         // cached as if it were whole. The legacy read returns whatever arrived
         // before the line fell quiet, and the modern read trusts the frame's
         // own length field, so neither can spot this on its own. This is the
-        // same guard the write-side read-back already applies.
-        if data.len() < params.length as usize {
+        // same guard the write-side read-back already applies. A long reply
+        // is just as wrong: appended whole, it shifts the rest of the page.
+        if data.len() != params.length as usize {
             return Err(ProtocolError::ProtocolError(format!(
-                "short read on page {} offset {}: got {} of {} bytes",
+                "wrong-length read on page {} offset {}: got {} of {} bytes",
                 params.page,
                 params.offset,
                 data.len(),
