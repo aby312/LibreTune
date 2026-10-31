@@ -445,6 +445,10 @@ pub struct Connection {
     /// fifteen `burnCommand` entries, one per page, each taking the page number),
     /// so burning "the tune" means burning each page that has changed.
     dirty_pages: std::collections::BTreeSet<u8>,
+    /// Pages whose last bulk write failed or did not CRC-verify. Their RAM
+    /// image is unknown, so every burn is refused until they are written
+    /// cleanly again (or the connection is rebuilt).
+    failed_pages: std::collections::BTreeSet<u8>,
     /// ECU type detected from the INI signature (Issue #71).
     /// Drives conservative runtime-command selection for Speeduino/MS2/MS3.
     ecu_type: EcuType,
@@ -476,6 +480,7 @@ impl Connection {
             rx_packets: 0,
             last_written_page: None,
             dirty_pages: std::collections::BTreeSet::new(),
+            failed_pages: std::collections::BTreeSet::new(),
             ecu_type: EcuType::Unknown,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -514,6 +519,7 @@ impl Connection {
             rx_packets: 0,
             last_written_page: None,
             dirty_pages: std::collections::BTreeSet::new(),
+            failed_pages: std::collections::BTreeSet::new(),
             ecu_type: EcuType::Unknown,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -1899,7 +1905,24 @@ impl Connection {
     }
 
     /// Write a full page to ECU, respecting blocking factor (same chunking as `read_page`).
+    ///
+    /// A page that fails to write or verify blocks every burn until it is
+    /// written cleanly: burning it would commit a RAM image known to be wrong,
+    /// and burning the pages written before it would commit half a tune.
     pub fn write_page(&mut self, page: u8, data: &[u8]) -> Result<(), ProtocolError> {
+        let result = self.write_and_verify_page(page, data);
+        if result.is_ok() {
+            self.failed_pages.remove(&page);
+        } else {
+            self.failed_pages.insert(page);
+            // Keep the next page change from auto-burning a page of the
+            // partial set (the burn would be refused and fail that write).
+            self.last_written_page = None;
+        }
+        result
+    }
+
+    fn write_and_verify_page(&mut self, page: u8, data: &[u8]) -> Result<(), ProtocolError> {
         let chunk_size = self.effective_write_chunk();
 
         let mut offset = 0usize;
@@ -2221,6 +2244,12 @@ impl Connection {
 
     /// Burn current page to flash using INI-defined command format
     pub fn burn(&mut self, params: BurnParams) -> Result<(), ProtocolError> {
+        if !self.failed_pages.is_empty() {
+            return Err(ProtocolError::ProtocolError(format!(
+                "refusing to burn: page(s) {:?} failed to write or verify; write the tune again or reconnect first",
+                self.failed_pages
+            )));
+        }
         let page = params.page as usize;
 
         // Get page identifier (may differ from page index)
@@ -4252,6 +4281,24 @@ mod burn_page_tests {
             dirty.iter().copied().collect::<Vec<_>>(),
             vec![0, 2, 3, 7, 15]
         );
+    }
+
+    /// A page whose write failed must never reach flash - not through the
+    /// Burn button, not through the empty-set page-0 fallback, and not through
+    /// an explicit single-page burn.
+    #[test]
+    fn a_failed_page_write_blocks_every_burn() {
+        use super::{BurnParams, Connection, ConnectionConfig};
+        let mut conn = Connection::new(ConnectionConfig::default());
+        // No port: the write fails, just as a dropped link or CRC mismatch would.
+        assert!(conn.write_page(0, &[1, 2, 3]).is_err());
+
+        let err = conn.send_burn_command().expect_err("burn must be refused");
+        assert!(err.to_string().contains("refusing to burn"), "{err}");
+        let err = conn
+            .burn(BurnParams { can_id: 0, page: 2 })
+            .expect_err("burn must be refused");
+        assert!(err.to_string().contains("refusing to burn"), "{err}");
     }
 }
 
