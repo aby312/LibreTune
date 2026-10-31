@@ -213,6 +213,7 @@ pub async fn load_tune(
 
     // Populate TuneCache from loaded tune data
     // This allows table operations to use cached data instead of reading from ECU
+    let mut applied_total = 0;
     {
         let def_guard = state.definition.lock().await;
         let def = def_guard.as_ref();
@@ -617,6 +618,7 @@ pub async fn load_tune(
                     }
                 }
 
+                applied_total = applied_count + pcvar_count;
                 if applied_count > 0 {
                     let total_applied = applied_count + pcvar_count;
                     eprintln!("[INFO] ✓ Successfully loaded {} constants into cache ({} page data + {} PC variables).", 
@@ -641,6 +643,20 @@ pub async fn load_tune(
                 eprintln!("[DEBUG] load_tune: no definition loaded, skipping constant application");
             }
         }
+    }
+
+    // Nothing usable came out of the file (a format the parser can't read, or
+    // a tune for a different ECU): fail the load instead of auto-saving an
+    // empty tune over the project's CurrentTune.msq below.
+    let has_page_data = tune
+        .pages
+        .values()
+        .any(|p| crate::commands::tune_apply::page_has_content(p));
+    if !has_page_data && applied_total == 0 {
+        return Err(format!(
+            "No tune data could be read from {} (0 pages, 0 constants applied); the project tune was left unchanged.",
+            path
+        ));
     }
 
     *state.current_tune.lock().await = Some(tune.clone());
@@ -668,7 +684,16 @@ pub async fn load_tune(
             .map(|project| project.path.join("CurrentTune.msq"))
     };
     if let Some(project_tune_path) = project_tune_path {
-        if let Err(e) = tune.save(&project_tune_path) {
+        // Keep the tune being replaced beside it; skip the overwrite if that
+        // copy can't be made.
+        let backup = project_tune_path.with_extension("msq.bak");
+        let backed_up = !project_tune_path.exists()
+            || std::fs::copy(&project_tune_path, &backup)
+                .map_err(|e| eprintln!("[WARN] Failed to back up {:?}: {}", project_tune_path, e))
+                .is_ok();
+        if !backed_up {
+            eprintln!("[WARN] Not saving tune to project folder: backup failed");
+        } else if let Err(e) = tune.save(&project_tune_path) {
             eprintln!("[WARN] Failed to save tune to project folder: {}", e);
         } else {
             eprintln!("[INFO] ✓ Saved tune to project: {:?}", project_tune_path);
