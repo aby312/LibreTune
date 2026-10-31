@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 mod commands;
 #[cfg(desktop)]
 mod mcp;
+#[cfg(mobile)]
+mod usb_android;
 mod paths;
 mod port_editor; // used by commands/ini_dialogs.rs
 mod state;
@@ -214,6 +216,10 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(usb_android::init());
     }
     builder
         .plugin(tauri_plugin_opener::init())
@@ -531,6 +537,18 @@ pub fn run() {
             get_wasm_plugin_info,
             log_webview_message,
             // Local MCP server (read-only tune tools for external agents)
+            #[cfg(mobile)]
+            usb_android::usb_ping,
+            #[cfg(mobile)]
+            usb_android::usb_list,
+            #[cfg(mobile)]
+            usb_android::usb_request_permission,
+            #[cfg(mobile)]
+            usb_android::usb_open,
+            #[cfg(mobile)]
+            usb_android::usb_query,
+            #[cfg(mobile)]
+            usb_android::usb_close,
             #[cfg(desktop)]
             mcp::commands::mcp_status,
             #[cfg(desktop)]

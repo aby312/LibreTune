@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { installWebviewConsoleCapture } from "./webviewConsoleCapture";
 import App from "./App";
 import PopOutWindow from "./PopOutWindow";
+import UsbProbe from "./components/mobile/UsbProbe";
 import { LoadingProvider } from "./contexts/LoadingContext";
 import { ToastProvider } from "./contexts/ToastContext";
 import { UnitPreferencesProvider } from "./contexts/useUnitPreferences";
@@ -54,7 +55,14 @@ function Root() {
   // Show what we're rendering
   console.log('[main.tsx] Rendering:', isPopOut ? 'PopOutWindow' : 'App');
 
-  return isPopOut ? <PopOutWindow /> : <App />;
+  if (isPopOut) return <PopOutWindow />;
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  return (
+    <>
+      <App />
+      {isAndroid && <UsbProbe />}
+    </>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
