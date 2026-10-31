@@ -39,6 +39,7 @@ pub mod find_inis;
 pub mod firmware_update;
 pub mod generate_table;
 pub mod get_table_data;
+#[cfg(desktop)]
 pub mod git;
 pub mod hotkeys;
 pub mod ini_dialogs;
@@ -90,5 +91,6 @@ pub mod tune_mismatch_view;
 pub mod types;
 pub mod update_project_ini;
 pub mod util_helpers;
+#[cfg(desktop)]
 pub mod wasm_plugin;
 pub mod webview_log;

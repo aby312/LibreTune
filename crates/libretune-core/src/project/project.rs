@@ -122,10 +122,28 @@ pub struct Project {
     pub dirty: bool,
 }
 
+/// Base directories supplied by the host app on platforms where `dirs`
+/// has no answer (Android): `(documents, data)`.
+static BASE_DIRS: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
+
+/// Register host-provided base directories. Call once at startup on mobile;
+/// the first call wins.
+pub fn set_base_dirs(documents: PathBuf, data: PathBuf) {
+    let _ = BASE_DIRS.set((documents, data));
+}
+
+/// Host-provided data directory, if one was registered.
+pub fn base_data_dir() -> Option<PathBuf> {
+    BASE_DIRS.get().map(|(_, d)| d.clone())
+}
+
 impl Project {
     /// Get the default projects directory
     pub fn projects_dir() -> io::Result<PathBuf> {
-        let base = dirs::document_dir()
+        let base = BASE_DIRS
+            .get()
+            .map(|(d, _)| d.clone())
+            .or_else(dirs::document_dir)
             .or_else(dirs::home_dir)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "Could not find home directory")

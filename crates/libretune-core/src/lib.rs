@@ -51,9 +51,12 @@ pub mod dynamic_table;
 pub mod ecu;
 pub mod ini;
 pub mod llm;
+#[cfg(feature = "lua")]
 pub mod lua;
 pub mod pin_conflict;
+#[cfg(feature = "plugins")]
 pub mod plugin_api;
+#[cfg(feature = "plugins")]
 pub mod plugin_system;
 pub mod project;
 pub mod protocol;

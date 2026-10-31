@@ -2,6 +2,7 @@
 
 use crate::state::AppState;
 use libretune_core::ini::{CommandPart, EcuDefinition};
+#[cfg(desktop)]
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 /// Lists all tune files in the projects directory.
@@ -70,7 +71,10 @@ pub async fn burn_to_ecu(
     }
 
     // Save window state before critical operation (in case of crash)
+    #[cfg(desktop)]
     let _ = app.save_window_state(StateFlags::all());
+    #[cfg(mobile)]
+    let _ = &app;
 
     let mut conn_guard = state.connection.lock().await;
     let conn = conn_guard.as_mut().ok_or("Not connected to ECU")?;

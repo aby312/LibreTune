@@ -13,7 +13,11 @@ use libretune_core::datalog::DataLogger;
 use libretune_core::ini::{
     EcuDefinition, Endianness, IncTableCache, OutputChannel, ProtocolSettings,
 };
+#[cfg(desktop)]
 use libretune_core::plugin_system::PluginManager as WasmPluginManager;
+/// Mobile builds have no WASM plugin host; the slot stays permanently empty.
+#[cfg(mobile)]
+pub enum WasmPluginManager {}
 use libretune_core::project::{IniRepository, OnlineIniRepository, Project, UserMathChannel};
 use libretune_core::protocol::{Connection, ConnectionConfig};
 use libretune_core::realtime::Evaluator;

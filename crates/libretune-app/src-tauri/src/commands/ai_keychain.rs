@@ -14,11 +14,18 @@
 const SERVICE: &str = "LibreTune";
 const ACCOUNT: &str = "ai_api_key";
 
+#[cfg(desktop)]
 fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| format!("keychain unavailable: {e}"))
 }
 
 /// Store `key` in the OS keychain, replacing any previous value.
+#[cfg(mobile)]
+pub(crate) fn store(_key: &str) -> Result<(), String> {
+    Err("keychain unavailable on this platform".to_string())
+}
+
+#[cfg(desktop)]
 pub(crate) fn store(key: &str) -> Result<(), String> {
     let entry = entry()?;
     // set_password overwrites on every mainstream backend, but a few map it
@@ -30,6 +37,12 @@ pub(crate) fn store(key: &str) -> Result<(), String> {
 }
 
 /// Read the key from the OS keychain. `None` when absent or unavailable.
+#[cfg(mobile)]
+pub(crate) fn load() -> Option<String> {
+    None
+}
+
+#[cfg(desktop)]
 pub(crate) fn load() -> Option<String> {
     let entry = entry().ok()?;
     match entry.get_password() {
@@ -40,6 +53,10 @@ pub(crate) fn load() -> Option<String> {
 }
 
 /// Remove the key from the OS keychain (best-effort).
+#[cfg(mobile)]
+pub(crate) fn delete() {}
+
+#[cfg(desktop)]
 pub(crate) fn delete() {
     if let Ok(entry) = entry() {
         let _ = entry.delete_credential();

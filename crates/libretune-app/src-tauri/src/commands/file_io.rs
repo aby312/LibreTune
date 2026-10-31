@@ -41,6 +41,9 @@ fn allowed_roots() -> Vec<PathBuf> {
         .into_iter()
         .flatten(),
     );
+    // Mobile: `dirs` has no Documents/Downloads; use the host-registered dirs.
+    #[cfg(mobile)]
+    roots.extend(libretune_core::project::base_data_dir());
     // Tests write to a scratch directory rather than the user's real Documents.
     #[cfg(test)]
     roots.push(std::env::temp_dir());

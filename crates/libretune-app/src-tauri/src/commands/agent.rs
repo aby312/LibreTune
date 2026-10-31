@@ -1347,7 +1347,12 @@ pub async fn agent_apply_proposals(
                     .await
                 {
                     Ok(()) => {
-                        match crate::commands::git::commit_project_state(&state, &message).await {
+                        #[cfg(desktop)]
+                        let commit = crate::commands::git::commit_project_state(&state, &message).await;
+                        #[cfg(mobile)]
+                        let commit: Result<String, String> =
+                            Err("no git repository (git support is not built for mobile)".into());
+                        match commit {
                             Ok(sha) => auto_committed = Some(sha),
                             // "no git repository" is a skip, not a failure.
                             Err(e) if e.contains("no git repository") => {}

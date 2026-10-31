@@ -27,6 +27,7 @@ mod online_repository;
 mod project;
 mod properties;
 mod repository;
+#[cfg(feature = "git")]
 mod version_control;
 
 pub use math_channels::{
@@ -34,10 +35,11 @@ pub use math_channels::{
 };
 pub use online_repository::{BundleSignature, IniSource, OnlineIniEntry, OnlineIniRepository};
 pub use project::{
-    ConnectionSettings, Project, ProjectConfig, ProjectInfo, ProjectSettings, RestorePointInfo,
+    base_data_dir, set_base_dirs, ConnectionSettings, Project, ProjectConfig, ProjectInfo, ProjectSettings, RestorePointInfo,
 };
 pub use properties::Properties;
 pub use repository::{IniEntry, IniRepository};
+#[cfg(feature = "git")]
 pub use version_control::{
     format_commit_message, BranchInfo, CommitDiff, CommitInfo, TuneChange, VersionControl,
 };

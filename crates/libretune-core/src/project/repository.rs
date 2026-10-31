@@ -43,7 +43,8 @@ pub struct IniRepository {
 impl IniRepository {
     /// Get the default repository directory (in app data)
     pub fn default_path() -> io::Result<PathBuf> {
-        let base = dirs::data_local_dir()
+        let base = super::project::base_data_dir()
+            .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "Could not find app data directory")

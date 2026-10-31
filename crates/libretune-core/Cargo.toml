@@ -6,6 +6,14 @@ license.workspace = true
 authors.workspace = true
 description = "Core library for LibreTune ECU tuning software"
 
+[features]
+# Heavy or desktop-oriented subsystems. All on by default; the Android build
+# turns off `plugins` and `git` (see libretune-app/src-tauri/Cargo.toml).
+default = ["plugins", "git", "lua"]
+plugins = ["dep:wasmtime"]
+git = ["dep:git2"]
+lua = ["dep:mlua"]
+
 [dependencies]
 # Async runtime
 tokio = { workspace = true }
@@ -56,7 +64,7 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 base64 = "0.22"
 
 # Lua scripting engine (sandboxed)
-mlua = { version = "0.10", features = ["lua54", "vendored"] }
+mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 
 # Directory paths
 dirs = "5.0"
@@ -66,10 +74,10 @@ libc = "0.2.178"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Git integration for tune versioning (using vendored libgit2 + bundled SSL)
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"], optional = true }
 
 # WebAssembly runtime for plugin system
-wasmtime = { workspace = true }
+wasmtime = { workspace = true, optional = true }
 
 # Text encoding detection (Windows-1252 fallback for legacy ECU INI files)
 encoding_rs = "0.8"

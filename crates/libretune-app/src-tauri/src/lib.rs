@@ -11,6 +11,7 @@ use libretune_core::project::OnlineIniRepository;
 use tokio::sync::Mutex;
 
 mod commands;
+#[cfg(desktop)]
 mod mcp;
 mod paths;
 mod port_editor; // used by commands/ini_dialogs.rs
@@ -96,6 +97,7 @@ use commands::firmware_update::{
 };
 use commands::generate_table::generate_table_values;
 use commands::get_table_data::get_table_data;
+#[cfg(desktop)]
 use commands::git::{
     git_checkout, git_commit, git_create_branch, git_current_branch, git_diff, git_has_changes,
     git_has_repo, git_history, git_init_project, git_list_branches, git_switch_branch,
@@ -177,6 +179,7 @@ use commands::tune_migration::{
 use commands::tune_misc::{update_constant_string, use_ecu_tune, use_project_tune};
 use commands::tune_mismatch_view::{get_tune_mismatch_dialog_index, get_tune_mismatch_dialog_view};
 use commands::update_project_ini::update_project_ini;
+#[cfg(desktop)]
 use commands::wasm_plugin::{
     execute_wasm_plugin, get_wasm_plugin_info, list_wasm_plugins, load_wasm_plugin,
     unload_wasm_plugin,
@@ -206,8 +209,13 @@ pub fn run() {
         .with_target(true)
         .init();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
@@ -444,16 +452,27 @@ pub fn run() {
             preview_tunerstudio_import,
             import_tunerstudio_project,
             // Git version control commands
+            #[cfg(desktop)]
             git_init_project,
+            #[cfg(desktop)]
             git_has_repo,
+            #[cfg(desktop)]
             git_commit,
+            #[cfg(desktop)]
             git_history,
+            #[cfg(desktop)]
             git_diff,
+            #[cfg(desktop)]
             git_checkout,
+            #[cfg(desktop)]
             git_list_branches,
+            #[cfg(desktop)]
             git_create_branch,
+            #[cfg(desktop)]
             git_switch_branch,
+            #[cfg(desktop)]
             git_current_branch,
+            #[cfg(desktop)]
             git_has_changes,
             // Base map generator commands
             generate_base_map,
@@ -500,31 +519,54 @@ pub fn run() {
             update_constant_string,
             run_lua_script,
             // WASM Plugin commands
+            #[cfg(desktop)]
             load_wasm_plugin,
+            #[cfg(desktop)]
             unload_wasm_plugin,
+            #[cfg(desktop)]
             list_wasm_plugins,
+            #[cfg(desktop)]
             execute_wasm_plugin,
+            #[cfg(desktop)]
             get_wasm_plugin_info,
             log_webview_message,
             // Local MCP server (read-only tune tools for external agents)
+            #[cfg(desktop)]
             mcp::commands::mcp_status,
+            #[cfg(desktop)]
             mcp::commands::mcp_set_enabled,
+            #[cfg(desktop)]
             mcp::commands::mcp_set_port,
+            #[cfg(desktop)]
             mcp::commands::mcp_get_token,
+            #[cfg(desktop)]
             mcp::commands::mcp_regenerate_token
         ])
-        .manage(mcp::server::McpServerState::default())
         .setup(|app| {
+            #[cfg(mobile)]
+            {
+                use tauri::Manager;
+                if let Ok(dir) = app.path().app_data_dir() {
+                    let docs = dir.join("Documents");
+                    let _ = std::fs::create_dir_all(&docs);
+                    libretune_core::project::set_base_dirs(docs, dir);
+                }
+            }
+            #[cfg(desktop)]
+            tauri::Manager::manage(&*app, mcp::server::McpServerState::default());
             // Restart the MCP server if the user left it enabled last run.
             // Spawned rather than awaited: a busy port must not block the
             // window from opening, and the failure surfaces in the Settings
             // dialog's status line either way.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = mcp::commands::start_on_boot(&handle).await {
-                    tracing::warn!("MCP server did not start on boot: {e}");
-                }
-            });
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = mcp::commands::start_on_boot(&handle).await {
+                        tracing::warn!("MCP server did not start on boot: {e}");
+                    }
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
