@@ -59,7 +59,7 @@ pub struct ProjectSettings {
     /// Automatically load CurrentTune.msq on project open
     pub auto_load_tune: bool,
 
-    /// Automatically save tune to CurrentTune.msq on close
+    /// Unused since close() stopped saving; kept so project.json still parses
     pub auto_save_tune: bool,
 
     /// Auto-connect on project open
@@ -405,11 +405,12 @@ impl Project {
         Ok(())
     }
 
-    /// Close project (saves if auto-save enabled)
+    /// Close project
+    ///
+    /// Does not write the tune: `current_tune` is only the copy read at open
+    /// (the app saves its own in-memory tune), so writing it here would
+    /// revert every save made since. Unsaved edits are dropped, as before.
     pub fn close(self) -> io::Result<()> {
-        if self.config.settings.auto_save_tune {
-            self.save_current_tune()?;
-        }
         Ok(())
     }
 
@@ -857,5 +858,46 @@ mod tests {
             .unwrap();
         assert!(!inside.exists());
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn test_close_does_not_overwrite_tune_saved_after_open() {
+        // `project.current_tune` is only the copy read at open. The app edits
+        // and saves its own in-memory tune straight to CurrentTune.msq, so a
+        // close that wrote the stale copy back (auto_save_tune is on by
+        // default) silently reverted every save made since the project opened.
+        use crate::tune::TuneValue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ini = dir.path().join("fake.ini");
+        fs::write(&ini, "[MegaTune]\nsignature = \"TestECU 1.0\"").unwrap();
+        let created = Project::create("Close Test", &ini, "TestECU 1.0", Some(dir.path())).unwrap();
+
+        let mut base = TuneFile::new("TestECU 1.0");
+        base.set_constant_with_page("reqFuel", TuneValue::Scalar(10.0), 1);
+        base.set_page(1, vec![0u8; 16]);
+        base.save(created.current_tune_path()).unwrap();
+
+        let project = Project::open(&created.path).unwrap();
+        assert!(project.config.settings.auto_save_tune);
+        assert!(project.current_tune.is_some());
+
+        // The app's Save: new values on disk, project.current_tune untouched.
+        let mut edited = TuneFile::load(project.current_tune_path()).unwrap();
+        edited.set_constant_with_page("reqFuel", TuneValue::Scalar(12.5), 1);
+        let mut page = edited.get_page(1).unwrap().to_vec();
+        page[3] = 0x7F;
+        edited.set_page(1, page);
+        edited.save(project.current_tune_path()).unwrap();
+        let tune_path = project.current_tune_path();
+
+        project.close().unwrap();
+
+        let after = TuneFile::load(&tune_path).unwrap();
+        match after.get_constant("reqFuel") {
+            Some(TuneValue::Scalar(v)) => assert_eq!(*v, 12.5, "close reverted the saved reqFuel"),
+            other => panic!("reqFuel missing or wrong type: {other:?}"),
+        }
+        assert_eq!(after.get_page(1).map(|p| p[3]), Some(0x7F));
     }
 }
