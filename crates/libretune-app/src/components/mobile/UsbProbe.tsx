@@ -38,7 +38,20 @@ export default function UsbProbe() {
       add(`${label} ERROR: ${String(e)}`);
     }
   };
+  const [bt, setBt] = useState<{ name: string; address: string }[]>([]);
   const first = devices[0];
+  const btBench = async () => {
+    const r = (await invoke("bt_query", { command: "Q", count: 100 })) as { firstByteMs: number[]; totalMs: number[] };
+    add(`BT Q x100 first byte: ${stats(r.firstByteMs)}`);
+    add(`BT Q x100 complete:   ${stats(r.totalMs)}`);
+    const js: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const s = performance.now();
+      await invoke("bt_query", { command: "Q", count: 1 });
+      js.push(performance.now() - s);
+    }
+    add(`BT JS->Rust->Kotlin Q x20: ${stats(js)}`);
+  };
 
   const bench = async () => {
     const n = 100;
@@ -75,6 +88,18 @@ export default function UsbProbe() {
             <button onClick={() => run("S version", async () => ((await invoke("usb_query", { command: "S", count: 1 })) as { reply: string }).reply)}>S</button>
             <button onClick={() => run("bench", bench)}>Bench</button>
             <button onClick={() => run("close", () => invoke("usb_close"))}>Close</button>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "4px 0" }}>
+            <b>BT:</b>
+            <button onClick={() => run("bt perm", () => invoke("bt_request"))}>Allow</button>
+            <button onClick={() => run("bt paired", async () => { const r = (await invoke("bt_list")) as { devices: { name: string; address: string }[] }; setBt(r.devices); return r.devices; })}>Paired</button>
+            {bt.map((d) => (
+              <button key={d.address} onClick={() => run(`bt connect ${d.name}`, () => invoke("bt_connect", { address: d.address }))}>{d.name || d.address}</button>
+            ))}
+            <button onClick={() => run("BT Q", async () => ((await invoke("bt_query", { command: "Q", count: 1 })) as { reply: string }).reply)}>Q</button>
+            <button onClick={() => run("BT S", async () => ((await invoke("bt_query", { command: "S", count: 1 })) as { reply: string }).reply)}>S</button>
+            <button onClick={() => run("bt bench", btBench)}>Bench</button>
+            <button onClick={() => run("bt close", () => invoke("bt_close"))}>Close</button>
           </div>
           <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{log.join("\n")}</pre>
         </>

@@ -549,6 +549,16 @@ pub fn run() {
             usb_android::usb_query,
             #[cfg(mobile)]
             usb_android::usb_close,
+            #[cfg(mobile)]
+            usb_android::bt_request,
+            #[cfg(mobile)]
+            usb_android::bt_list,
+            #[cfg(mobile)]
+            usb_android::bt_connect,
+            #[cfg(mobile)]
+            usb_android::bt_query,
+            #[cfg(mobile)]
+            usb_android::bt_close,
             #[cfg(desktop)]
             mcp::commands::mcp_status,
             #[cfg(desktop)]

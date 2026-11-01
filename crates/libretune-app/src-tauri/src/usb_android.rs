@@ -6,6 +6,7 @@ use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::{Manager, Runtime, State};
 
 pub struct UsbHandle<R: Runtime>(PluginHandle<R>);
+pub struct BtHandle<R: Runtime>(PluginHandle<R>);
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("usb")
@@ -14,6 +15,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             {
                 let handle = api.register_android_plugin("com.libretune.app", "UsbPlugin")?;
                 app.manage(UsbHandle(handle));
+                let bt = api.register_android_plugin("com.libretune.app", "BtPlugin")?;
+                app.manage(BtHandle(bt));
             }
             #[cfg(not(target_os = "android"))]
             let _ = (app, api);
@@ -72,4 +75,42 @@ pub async fn usb_query(
 #[tauri::command]
 pub fn usb_close(h: State<'_, UsbHandle<tauri::Wry>>) -> Result<Value, String> {
     call(&h, "close", json!({}))
+}
+
+fn bt_call(h: &BtHandle<tauri::Wry>, cmd: &str, args: Value) -> Result<Value, String> {
+    h.0.run_mobile_plugin::<Value>(cmd, args)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn bt_request(h: State<'_, BtHandle<tauri::Wry>>) -> Result<Value, String> {
+    bt_call(&h, "requestBt", json!({}))
+}
+
+#[tauri::command]
+pub async fn bt_list(h: State<'_, BtHandle<tauri::Wry>>) -> Result<Value, String> {
+    bt_call(&h, "listPaired", json!({}))
+}
+
+#[tauri::command]
+pub async fn bt_connect(
+    h: State<'_, BtHandle<tauri::Wry>>,
+    address: String,
+) -> Result<Value, String> {
+    bt_call(&h, "connect", json!({ "address": address }))
+}
+
+/// `command` must be "Q" or "S"; the Kotlin side enforces it.
+#[tauri::command]
+pub async fn bt_query(
+    h: State<'_, BtHandle<tauri::Wry>>,
+    command: String,
+    count: u32,
+) -> Result<Value, String> {
+    bt_call(&h, "query", json!({ "command": command, "count": count }))
+}
+
+#[tauri::command]
+pub async fn bt_close(h: State<'_, BtHandle<tauri::Wry>>) -> Result<Value, String> {
+    bt_call(&h, "close", json!({}))
 }
