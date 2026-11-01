@@ -1364,9 +1364,9 @@ function AppContent() {
     }
   }
 
-  async function handleDeleteProject(projectName: string) {
+  async function handleDeleteProject(path: string, projectName: string) {
     try {
-      await invoke("delete_project", { projectName });
+      await invoke("delete_project", { path });
       showToast(`Project "${projectName}" deleted`, "success");
       // Refresh project list
       const projects = await invoke<ProjectInfo[]>("list_projects");

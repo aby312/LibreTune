@@ -14,7 +14,7 @@ interface WelcomeViewProps {
   onOpenProject: (path: string) => void;
   onNewProject: () => void;
   onImportTsProject: () => void;
-  onDeleteProject: (name: string) => void;
+  onDeleteProject: (path: string, name: string) => void;
 }
 
 export default function WelcomeView({
@@ -26,13 +26,14 @@ export default function WelcomeView({
 }: WelcomeViewProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  function handleDelete(e: React.MouseEvent, projectName: string) {
+  // Keyed by path: two projects can share a display name.
+  function handleDelete(e: React.MouseEvent, project: ProjectInfo) {
     e.stopPropagation();
-    if (confirmDelete === projectName) {
-      onDeleteProject(projectName);
+    if (confirmDelete === project.path) {
+      onDeleteProject(project.path, project.name);
       setConfirmDelete(null);
     } else {
-      setConfirmDelete(projectName);
+      setConfirmDelete(project.path);
     }
   }
 
@@ -74,11 +75,11 @@ export default function WelcomeView({
                   </div>
                 </div>
                 <button
-                  className={`recent-delete ${confirmDelete === project.name ? "confirm" : ""}`}
-                  onClick={(e) => handleDelete(e, project.name)}
-                  title={confirmDelete === project.name ? "Click again to confirm" : "Delete project"}
+                  className={`recent-delete ${confirmDelete === project.path ? "confirm" : ""}`}
+                  onClick={(e) => handleDelete(e, project)}
+                  title={confirmDelete === project.path ? "Click again to confirm" : "Delete project"}
                 >
-                  {confirmDelete === project.name ? (
+                  {confirmDelete === project.path ? (
                     <><Check size={14} /> Confirm</>
                   ) : (
                     <X size={14} />
