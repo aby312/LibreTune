@@ -497,10 +497,12 @@ enum SyncFound {
 
 fn find_sync<R: Read>(r: &mut R, block: &[u8; 4], footer: &[u8; 4]) -> io::Result<SyncFound> {
     let mut window = [0u8; 4];
-    match r.read(&mut window)? {
-        0 => return Ok(SyncFound::Eof),
-        1..=3 => return Ok(SyncFound::Eof),
-        _ => {}
+    // A plain `read` can return 1..=3 bytes mid-file when a `BufReader` buffer
+    // ends there, so only a failed `read_exact` means the log really ended.
+    match r.read_exact(&mut window) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(SyncFound::Eof),
+        Err(e) => return Err(e),
     }
     loop {
         if &window == block {
@@ -736,5 +738,53 @@ mod tests {
         assert_eq!(time.len(), 2);
         assert_eq!(cols[0], vec![40.0, 55.0]);
         assert!(cols[1].is_empty());
+    }
+
+    /// Hands out one byte per `read`, like a `BufReader` whose buffer ends mid-sync.
+    struct OneByteReads<'a>(&'a [u8]);
+
+    impl Read for OneByteReads<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.0.len().min(buf.len()).min(1);
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn find_sync_is_not_fooled_by_short_reads() {
+        let mut r = OneByteReads(b"LTBK");
+        assert!(matches!(
+            find_sync(&mut r, BLOCK_SYNC, FOOTER_SYNC).unwrap(),
+            SyncFound::Block
+        ));
+        // Fewer than 4 bytes left is still the end of the log.
+        let mut r = OneByteReads(b"LTB");
+        assert!(matches!(
+            find_sync(&mut r, BLOCK_SYNC, FOOTER_SYNC).unwrap(),
+            SyncFound::Eof
+        ));
+    }
+
+    #[test]
+    fn read_back_keeps_every_block_when_a_sync_straddles_the_buffer_edge() {
+        // Noisy data makes KiB-sized blocks. At this size one block's `LTBK`
+        // starts 1-3 bytes before the end of a `BufReader` 8 KiB buffer.
+        let mut s = 1005u64;
+        let entries: Vec<LogEntry> = (0..8496)
+            .map(|i| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                sample(20 * i, vec![((s >> 33) % 4096) as f64])
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.ltlog");
+        write_ltlog(&path, &schema(&["ch0"]), &entries).unwrap();
+
+        let (_, read) = read_ltlog(&path).unwrap();
+        assert_eq!(read.len(), entries.len());
     }
 }
