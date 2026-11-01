@@ -488,7 +488,7 @@ mod concurrency_tests {
 
         let s = state.clone();
         let saver = tokio::spawn(async move {
-            crate::commands::save_tune::save_tune_inner(&s, Some(target)).await
+            crate::commands::save_tune::save_tune_inner(&s, Some(target), true).await
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -510,6 +510,53 @@ mod concurrency_tests {
             dir.path().join("saved.msq").is_file(),
             "the tune should actually have been written"
         );
+    }
+
+    /// A backup written as a copy (`make_current = false`, what `save_tune_copy`
+    /// does) must not become the tune's save target: otherwise every later Save
+    /// would silently write to the backup file instead of the project's tune,
+    /// and the unsaved-changes flag would be cleared for a tune that never
+    /// reached its own file.
+    #[tokio::test]
+    async fn save_tune_copy_does_not_change_the_save_target() {
+        use libretune_core::tune::TuneFile;
+
+        let state = build_state_for_lock_tests();
+        *state.current_tune.lock().await = Some(TuneFile::new("test signature".to_string()));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tune_path = dir.path().join("CurrentTune.msq");
+        let backup_path = dir.path().join("ecu_backup.msq");
+        *state.current_tune_path.lock().await = Some(tune_path.clone());
+        *state.tune_modified.lock().await = true;
+
+        let written = crate::commands::save_tune::save_tune_inner(
+            &state,
+            Some(backup_path.to_string_lossy().to_string()),
+            false,
+        )
+        .await
+        .expect("save_tune_inner copy failed");
+
+        assert_eq!(written, backup_path.to_string_lossy());
+        assert!(backup_path.is_file(), "the backup should have been written");
+        assert!(!tune_path.exists(), "the tune's own file must be untouched");
+        assert_eq!(
+            state.current_tune_path.lock().await.as_ref(),
+            Some(&tune_path),
+            "the save target must still be the tune's own file"
+        );
+        assert!(
+            *state.tune_modified.lock().await,
+            "a copy must not clear the unsaved-changes flag"
+        );
+
+        // The next ordinary Save goes to the tune's own file, not the backup.
+        crate::commands::save_tune::save_tune_inner(&state, None, true)
+            .await
+            .expect("save_tune_inner failed");
+        assert!(tune_path.is_file());
+        assert!(!*state.tune_modified.lock().await);
     }
 }
 

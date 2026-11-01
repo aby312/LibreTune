@@ -1,4 +1,4 @@
-//! save_tune and save_tune_as commands (extracted from lib.rs).
+//! save_tune, save_tune_as and save_tune_copy commands (extracted from lib.rs).
 //!
 //! # AppState lock order
 //!
@@ -27,14 +27,27 @@ pub async fn save_tune(
     state: tauri::State<'_, AppState>,
     path: Option<String>,
 ) -> Result<String, String> {
-    save_tune_inner(&state, path).await
+    save_tune_inner(&state, path, true).await
+}
+
+/// Writes a copy of the current tune to `path` (e.g. a backup taken before an
+/// INI switch) without making it the tune's save target: later saves still go
+/// to the tune's own file, and the unsaved-changes flag is left alone.
+#[tauri::command]
+pub async fn save_tune_copy(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    save_tune_inner(&state, Some(path), false).await
 }
 
 /// The body of [`save_tune`], reachable without a `tauri::State` so the lock
-/// order above is unit-testable.
+/// order above is unit-testable. `make_current` re-points the tune at the file
+/// just written (Save / Save As); a plain copy leaves it where it was.
 pub(crate) async fn save_tune_inner(
     state: &AppState,
     path: Option<String>,
+    make_current: bool,
 ) -> Result<String, String> {
     // Lock order: see the module comment.
     let def_guard = state.definition.lock().await;
@@ -284,8 +297,10 @@ pub(crate) async fn save_tune_inner(
     .await
     .map_err(|e| format!("Tune save task failed: {}", e))??;
 
-    *state.current_tune_path.lock().await = Some(save_path.clone());
-    *state.tune_modified.lock().await = false;
+    if make_current {
+        *state.current_tune_path.lock().await = Some(save_path.clone());
+        *state.tune_modified.lock().await = false;
+    }
 
     Ok(save_path.to_string_lossy().to_string())
 }
