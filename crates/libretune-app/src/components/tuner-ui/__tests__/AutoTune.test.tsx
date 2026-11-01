@@ -305,3 +305,65 @@ describe('AutoTune authority limit inputs reject negative values', () => {
     await waitFor(() => expect(perCell.value).toBe('0'));
   });
 });
+
+// Clicking a cell used to flip a local lock icon only. The backend was never
+// told, so "locked" cells kept collecting recommendations and Send to ECU wrote
+// them. The icon has to mean the backend is skipping the cell.
+describe('AutoTune cell locks reach the backend', () => {
+  // The first cell: x=0, y=0.
+  const renderGrid = async () => {
+    const { container } = render(
+      <ToastProvider><AutoTune tableName="veTable1Tbl" isConnected /></ToastProvider>,
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll('td.autotune-cell')).toHaveLength(4),
+    );
+    return container.querySelector('td.autotune-cell') as HTMLElement;
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockInvoke();
+  });
+
+  it('locks the clicked cell on the backend, then shows the lock', async () => {
+    const cell = await renderGrid();
+
+    await userEvent.click(cell);
+
+    await waitFor(() => expect(cell).toHaveClass('locked'));
+    expect(cell.querySelector('.cell-lock-icon')).not.toBeNull();
+    expect(invoke).toHaveBeenCalledWith('lock_autotune_cells', {
+      cells: [[0, 0]],
+      tableName: 'veTable1Tbl',
+    });
+  });
+
+  it('unlocks a locked cell on the backend', async () => {
+    const cell = await renderGrid();
+    await userEvent.click(cell);
+    await waitFor(() => expect(cell).toHaveClass('locked'));
+
+    await userEvent.click(cell);
+
+    await waitFor(() => expect(cell).not.toHaveClass('locked'));
+    expect(invoke).toHaveBeenCalledWith('unlock_autotune_cells', {
+      cells: [[0, 0]],
+      tableName: 'veTable1Tbl',
+    });
+  });
+
+  it('shows the error and no lock when the backend refuses', async () => {
+    const base = (invoke as unknown as any).getMockImplementation();
+    (invoke as unknown as any).mockImplementation((cmd: string, args: unknown) =>
+      cmd === 'lock_autotune_cells' ? Promise.reject('autotune state busy') : base(cmd, args),
+    );
+    const cell = await renderGrid();
+
+    await userEvent.click(cell);
+
+    expect(await screen.findByText(/Failed to lock cell: autotune state busy/)).toBeInTheDocument();
+    expect(cell).not.toHaveClass('locked');
+    expect(cell.querySelector('.cell-lock-icon')).toBeNull();
+  });
+});

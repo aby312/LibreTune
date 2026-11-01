@@ -29,7 +29,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { FolderOpen, Save, Square, Play, Upload, X, Lock, LockOpen } from 'lucide-react';
+import { FolderOpen, Save, Square, Play, Upload, X, Lock } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { valueToHeatmapColor } from '../../utils/heatmapColors';
@@ -352,7 +352,6 @@ export function AutoTune({ tableName: initialTableName = '', onClose, isConnecte
   const [sampleStats, setSampleStats] = useState<AutotuneSampleStats | null>(null);
   const [veAnalyzeConfig, setVeAnalyzeConfig] = useState<VeAnalyzeConfig | null>(null);
   const [lockedCells, setLockedCells] = useState<Set<string>>(new Set());
-  const [selectedCells, _setSelectedCells] = useState<Set<string>>(new Set());
   const [showHeatmap, setShowHeatmap] = useState<'weighting' | 'change' | 'none'>('weighting');
   const [error, setError] = useState<string | null>(null);
   const [loadSource, setLoadSource] = useState<AutoTuneLoadSource>('map');
@@ -702,7 +701,6 @@ export function AutoTune({ tableName: initialTableName = '', onClose, isConnecte
 
   useEffect(() => {
     setLockedCells(new Set());
-    _setSelectedCells(new Set());
     setHeatmapData([]);
   }, [activeTable]);
 
@@ -891,50 +889,32 @@ export function AutoTune({ tableName: initialTableName = '', onClose, isConnecte
     }
   }, [activeTable, loadTableData]);
 
-  const toggleCellLock = useCallback((x: number, y: number) => {
-    const key = `${x},${y}`;
-    setLockedCells((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
+  // The lock icon must mean the backend is skipping the cell, so the local Set
+  // only changes once the backend has accepted the lock/unlock.
+  const toggleCellLock = useCallback(
+    async (x: number, y: number) => {
+      const key = `${x},${y}`;
+      const locking = !lockedCells.has(key);
+      try {
+        await invoke(locking ? 'lock_autotune_cells' : 'unlock_autotune_cells', {
+          cells: [[x, y]],
+          tableName: activeTable,
+        });
+        setLockedCells((prev) => {
+          const next = new Set(prev);
+          if (locking) {
+            next.add(key);
+          } else {
+            next.delete(key);
+          }
+          return next;
+        });
+      } catch (e) {
+        setError(`Failed to ${locking ? 'lock' : 'unlock'} cell: ${e}`);
       }
-      return next;
-    });
-  }, []);
-
-  const lockSelectedCells = useCallback(async () => {
-    const cells = Array.from(selectedCells).map((key) => {
-      const [x, y] = key.split(',').map(Number);
-      return [x, y] as [number, number];
-    });
-    
-    try {
-      await invoke('lock_autotune_cells', { cells, tableName: activeTable });
-      setLockedCells((prev) => new Set([...prev, ...selectedCells]));
-    } catch (e) {
-      console.error('Failed to lock cells:', e);
-    }
-  }, [activeTable, selectedCells]);
-
-  const unlockSelectedCells = useCallback(async () => {
-    const cells = Array.from(selectedCells).map((key) => {
-      const [x, y] = key.split(',').map(Number);
-      return [x, y] as [number, number];
-    });
-    
-    try {
-      await invoke('unlock_autotune_cells', { cells, tableName: activeTable });
-      setLockedCells((prev) => {
-        const next = new Set(prev);
-        selectedCells.forEach((key) => next.delete(key));
-        return next;
-      });
-    } catch (e) {
-      console.error('Failed to unlock cells:', e);
-    }
-  }, [activeTable, selectedCells]);
+    },
+    [activeTable, lockedCells]
+  );
 
   // Build heatmap lookup
   const heatmapLookup = useMemo(() => {
@@ -1453,12 +1433,6 @@ export function AutoTune({ tableName: initialTableName = '', onClose, isConnecte
               <option value="change">Change Magnitude</option>
               <option value="none">Value Only</option>
             </select>
-            <button onClick={lockSelectedCells} disabled={selectedCells.size === 0}>
-              <Lock size={14} /> Lock
-            </button>
-            <button onClick={unlockSelectedCells} disabled={selectedCells.size === 0}>
-              <LockOpen size={14} /> Unlock
-            </button>
           </div>
 
           <div className="autotune-table-container">
@@ -1479,14 +1453,13 @@ export function AutoTune({ tableName: initialTableName = '', onClose, isConnecte
                       const value = tableData.z_values[y]?.[x] ?? 0;
                       const key = `${x},${y}`;
                       const isLocked = lockedCells.has(key);
-                      const isSelected = selectedCells.has(key);
                       const isCurrent = currentCell?.x === x && currentCell?.y === y;
                       const entry = heatmapLookup[key];
 
                       return (
                         <td
                           key={x}
-                          className={`autotune-cell ${isLocked ? 'locked' : ''} ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''} ${entry && entry.hit_count > 0 ? 'has-hits' : ''}`}
+                          className={`autotune-cell ${isLocked ? 'locked' : ''} ${isCurrent ? 'current' : ''} ${entry && entry.hit_count > 0 ? 'has-hits' : ''}`}
                           style={{ backgroundColor: getCellColor(x, y, value) }}
                           onClick={() => toggleCellLock(x, y)}
                           title={
