@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, KeyboardEven
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { useChannels } from '../../stores/realtimeStore';
+import { useToast } from '../../contexts/ToastContext';
 import { useHeatmapSettings } from '../../utils/useHeatmapSettings';
 import { contrastTextColor } from '../../utils/heatmapColors';
 import { askNumber } from '../../utils/askNumber';
@@ -175,12 +176,24 @@ export function TableEditor({
 
   // Tab contents only live in React. Without this, cell/Smooth edits never
   // reach the tune cache or the ECU (issue #325), while Generate/import did.
-  const persistChange = useCallback((newData: TableData) => {
+  // A refused write (e.g. the ECU read-back did not match) is shown to the
+  // user. The grid keeps the edit: the backend mirrors it into the tune cache
+  // before the ECU write, so the cache (and the next Save) hold it too.
+  const { showToast } = useToast();
+  const persistChange = useCallback(async (newData: TableData) => {
     onChange(newData);
-    invoke('update_table_data', { tableName: newData.name, zValues: newData.zValues }).catch(
-      (err) => console.error('Failed to persist table:', err),
-    );
-  }, [onChange]);
+    try {
+      await invoke('update_table_data', { tableName: newData.name, zValues: newData.zValues });
+    } catch (err) {
+      console.error('Failed to persist table:', err);
+      // Long enough to read: the backend's message can say not to drive on the tune.
+      showToast(
+        `Table update failed: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
+        10000,
+      );
+    }
+  }, [onChange, showToast]);
 
   // TunerStudio-compatible .table file import/export for this one table.
   const handleExportTable = useCallback(async () => {
@@ -936,6 +949,10 @@ export function TableEditor({
 
     if (!selection) return;
 
+    // Alt/Meta + a character is never ours (Meta+S save, Alt+. status paging);
+    // leave it for window-level shortcuts. !ctrlKey keeps AltGr characters.
+    if ((e.altKey || e.metaKey) && !e.ctrlKey && e.key.length === 1) return;
+
     const { row, col } = selection.end;
     const multiplier = e.ctrlKey ? 5 : 1;
     const delta = e.shiftKey ? 1 : 0.1;
@@ -1018,8 +1035,11 @@ export function TableEditor({
         break;
       case 's':
       case 'S':
-        e.preventDefault();
-        smooth();
+        // Ctrl+S is the window-level Save; don't swallow it.
+        if (!e.ctrlKey) {
+          e.preventDefault();
+          smooth();
+        }
         break;
       case 'f':
       case 'F':
@@ -1056,8 +1076,10 @@ export function TableEditor({
         break;
       case 'h':
       case 'H':
-        e.preventDefault();
-        interpolateHorizontal();
+        if (!e.ctrlKey) {
+          e.preventDefault();
+          interpolateHorizontal();
+        }
         break;
       case 'v':
         if (e.ctrlKey) {

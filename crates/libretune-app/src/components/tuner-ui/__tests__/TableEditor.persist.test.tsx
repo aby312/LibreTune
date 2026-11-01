@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { TableEditor } from '../TableEditor';
+import { ToastProvider } from '../../../contexts/ToastContext';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -26,7 +27,7 @@ describe('TableEditor persistence', () => {
   });
 
   it('writes a cell edit to the backend, not only tab state', async () => {
-    render(<TableEditor data={{ ...DATA }} onChange={() => {}} />);
+    render(<TableEditor data={{ ...DATA }} onChange={() => {}} />, { wrapper: ToastProvider });
     fireEvent.mouseDown(document.querySelector('td.table-cell')!);
     fireEvent.click(screen.getByTitle('Smooth (s)'));
 
