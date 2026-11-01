@@ -353,6 +353,26 @@ export default function TableEditor2D({
     [table_name, handleOperationError, readOnly]
   );
 
+  /**
+   * Persist the axis bins, the way `setLocalZValues` persists the grid. Bins
+   * that only reach component state leave the ECU's breakpoints out of step
+   * with the screen. `interpolateZ: false` keeps the stored grid in place (by
+   * index), so only the bins change. Rejects on failure so the caller can put
+   * back what it showed.
+   */
+  const persistAxes = useCallback(
+    async (xBins: number[], yBins: number[]) => {
+      if (readOnly) return;
+      await invoke('rebin_table', {
+        tableName: table_name,
+        newXBins: xBins,
+        newYBins: yBins,
+        interpolateZ: false,
+      });
+    },
+    [table_name, readOnly]
+  );
+
   useEffect(() => {
     invoke('get_settings')
       .then((settings: any) => {
@@ -764,21 +784,28 @@ export default function TableEditor2D({
     }
   }, [localZValues, localXBins, localYBins, setLocalZValues, pushHistory, onValuesChange, warnIfLargeChange]);
 
-  const handleAxisChange = useCallback((axis: 'x' | 'y', index: number, value: number) => {
-    if (axis === 'x') {
-      const newBins = [...localXBins];
-      newBins[index] = value;
-      setLocalXBins(newBins);
-      setRebinDialog(prev => ({ ...prev, newXBins: newBins }));
-      pushHistory(localZValues, newBins, localYBins);
-    } else {
-      const newBins = [...localYBins];
-      newBins[index] = value;
-      setLocalYBins(newBins);
-      setRebinDialog(prev => ({ ...prev, newYBins: newBins }));
-      pushHistory(localZValues, localXBins, newBins);
+  const handleAxisChange = useCallback(async (axis: 'x' | 'y', index: number, value: number) => {
+    const prevX = localXBins;
+    const prevY = localYBins;
+    // Blur with the value unchanged: nothing to write to the ECU.
+    if ((axis === 'x' ? prevX : prevY)[index] === value) return;
+    const newX = axis === 'x' ? prevX.map((b, i) => (i === index ? value : b)) : prevX;
+    const newY = axis === 'y' ? prevY.map((b, i) => (i === index ? value : b)) : prevY;
+    setLocalXBins(newX);
+    setLocalYBins(newY);
+    setRebinDialog(prev => ({ ...prev, newXBins: newX, newYBins: newY }));
+    try {
+      await persistAxes(newX, newY);
+    } catch (err) {
+      // The ECU kept the old bins, so show them again.
+      setLocalXBins(prevX);
+      setLocalYBins(prevY);
+      setRebinDialog(prev => ({ ...prev, newXBins: prevX, newYBins: prevY }));
+      handleOperationError('Saving axis', err);
+      return;
     }
-  }, [localXBins, localYBins, localZValues, pushHistory]);
+    pushHistory(localZValues, newX, newY);
+  }, [localXBins, localYBins, localZValues, pushHistory, persistAxes, handleOperationError]);
 
   // TunerStudio-compatible .table file import/export for this one table.
   // import_table_from_file already writes the result to the tune/ECU cache
@@ -978,12 +1005,24 @@ export default function TableEditor2D({
   // Apply a freshly generated grid (from GenerateTableDialog) as a single
   // undoable edit. This is an intentional full-table reseed, so unlike the
   // cell operations it doesn't run the large-change guard.
-  const handleGenerateApply = (result: { zValues: number[][]; xBins?: number[]; yBins?: number[] }) => {
+  const handleGenerateApply = async (result: { zValues: number[][]; xBins?: number[]; yBins?: number[] }) => {
     const newX = result.xBins ?? localXBins;
     const newY = result.yBins ?? localYBins;
+    // Axes first, and stop if they fail: a grid generated for new bins written
+    // under the ECU's old bins is a wrong map, whereas a failed axis write
+    // leaves the old grid under the old bins, which is still consistent.
+    if (result.xBins || result.yBins) {
+      try {
+        await persistAxes(newX, newY);
+      } catch (err) {
+        handleOperationError('Saving axes', err);
+        return;
+      }
+      setLocalXBins(newX);
+      setLocalYBins(newY);
+      setRebinDialog(prev => ({ ...prev, newXBins: newX, newYBins: newY }));
+    }
     setLocalZValues(result.zValues);
-    if (result.xBins) setLocalXBins(result.xBins);
-    if (result.yBins) setLocalYBins(result.yBins);
     onValuesChange?.(result.zValues);
     pushHistory(result.zValues, newX, newY);
   };
@@ -1230,10 +1269,30 @@ export default function TableEditor2D({
     }
   };
 
-  const handleUndo = () => {
+  // Undo/redo put a snapshot's axes back on screen, so put them back on the ECU
+  // too, awaited before the Z write so the two can't interleave. Same-size axes
+  // only (a snapshot across a table resize is not handled here). False = the
+  // write failed: leave screen and history as they were.
+  const restoreAxes = async (snapshot: HistorySnapshot) => {
+    const differs =
+      snapshot.x.length === localXBins.length &&
+      snapshot.y.length === localYBins.length &&
+      (snapshot.x.some((v, i) => v !== localXBins[i]) || snapshot.y.some((v, i) => v !== localYBins[i]));
+    if (!differs) return true;
+    try {
+      await persistAxes(snapshot.x, snapshot.y);
+      return true;
+    } catch (err) {
+      handleOperationError('Saving axes', err);
+      return false;
+    }
+  };
+
+  const handleUndo = async () => {
     if (historyIndex > 0) {
       const prevIndex = historyIndex - 1;
       const snapshot = history[prevIndex];
+      if (!(await restoreAxes(snapshot))) return;
       
       setLocalZValues(snapshot.z);
       setLocalXBins(snapshot.x);
@@ -1243,16 +1302,16 @@ export default function TableEditor2D({
       setHistoryIndex(prevIndex);
       onValuesChange?.(snapshot.z);
       
-      // The z values are persisted by setLocalZValues above. Axis bins are
-      // still local-only: there is no command to write them, so an undo that
-      // crosses a re-bin restores the grid but not the ECU's axes.
+      // The z values are persisted by setLocalZValues above. An undo that
+      // crosses a table resize still restores the grid but not the ECU's size.
     }
   };
 
-  const handleRedo = () => {
+  const handleRedo = async () => {
     if (historyIndex < history.length - 1) {
       const nextIndex = historyIndex + 1;
       const snapshot = history[nextIndex];
+      if (!(await restoreAxes(snapshot))) return;
       
       setLocalZValues(snapshot.z);
       setLocalXBins(snapshot.x);
