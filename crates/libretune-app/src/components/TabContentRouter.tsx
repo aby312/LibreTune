@@ -38,6 +38,8 @@ export interface TabContentRouterProps {
   tabs: Tab[];
   tabContents: Record<string, TabContent>;
   setTabContents: (next: Record<string, TabContent>) => void;
+  /** Bumped when a tune is loaded; remounts table editors so undo/Escape state is not carried over. */
+  tuneLoadCount: number;
 
   // Welcome view actions
   openProject: (path: string) => void | Promise<void>;
@@ -77,6 +79,7 @@ export function TabContentRouter(props: TabContentRouterProps) {
     tabs,
     tabContents,
     setTabContents,
+    tuneLoadCount,
     openProject,
     setConnectEcuWizardOpen,
     setImportProjectOpen,
@@ -116,6 +119,9 @@ export function TabContentRouter(props: TabContentRouterProps) {
     case "table":
       return (
         <TableEditor
+          // Undo history, selection and the Escape snapshot belong to one table
+          // of one loaded tune.
+          key={`${(content.data as TunerTableData).name}:${tuneLoadCount}`}
           data={content.data as TunerTableData}
           onChange={(newData) => {
             if (activeTabId) {

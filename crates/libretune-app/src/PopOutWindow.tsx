@@ -344,6 +344,7 @@ export default function PopOutWindow() {
         }
         return (
           <TableEditor
+            key={(popOutData.data as TunerTableData).name}
             data={popOutData.data as TunerTableData}
             onChange={handleDataChange}
             onBurn={() => {

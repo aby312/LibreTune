@@ -4,6 +4,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { TableEditor, trailDisplayRow } from '../TableEditor';
 import { useRealtimeStore } from '../../../stores/realtimeStore';
+import { ToastProvider } from '../../../contexts/ToastContext';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -66,7 +67,8 @@ describe('TableEditor live trail', () => {
 
   it('fades a re-entered cell from its newest visit, not its oldest', async () => {
     const { container } = render(
-      <TableEditor data={{ ...DATA }} onChange={() => {}} />
+      <TableEditor data={{ ...DATA }} onChange={() => {}} />,
+      { wrapper: ToastProvider }
     );
     // Flush the async get_settings loads (trail fade defaults to 8 s).
     await act(async () => {
@@ -115,7 +117,8 @@ describe('TableEditor live trail', () => {
     render(
       <Profiler id="editor" onRender={onRender}>
         <TableEditor data={{ ...DATA }} onChange={() => {}} />
-      </Profiler>
+      </Profiler>,
+      { wrapper: ToastProvider }
     );
     await act(async () => {
       await Promise.resolve();
@@ -161,7 +164,8 @@ describe('trail overlay', () => {
 
   it('draws a trail line and current-position dot over the grid', async () => {
     const { container } = render(
-      <TableEditor data={{ ...DATA }} onChange={() => {}} />
+      <TableEditor data={{ ...DATA }} onChange={() => {}} />,
+      { wrapper: ToastProvider }
     );
     await act(async () => {
       await Promise.resolve();
@@ -198,7 +202,8 @@ describe('trail overlay', () => {
       <TableEditor
         data={{ ...DATA, xOutputChannel: undefined, yOutputChannel: undefined }}
         onChange={() => {}}
-      />
+      />,
+      { wrapper: ToastProvider }
     );
     await act(async () => {
       await Promise.resolve();

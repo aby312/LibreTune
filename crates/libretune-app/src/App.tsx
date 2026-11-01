@@ -270,6 +270,8 @@ function AppContent() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabContents, setTabContents] = useState<Record<string, TabContent>>({});
+  // Bumped each time a tune load refreshes the open tabs; keys the table editors.
+  const [tuneLoadCount, setTuneLoadCount] = useState(0);
 
   // Sidebar state
   const [sidebarVisible, setSidebarVisible] = useState(true);
@@ -1275,7 +1277,11 @@ function AppContent() {
         // keep the tab's previous data
       }
     }
-    if (changed) setTabContents(updated);
+    if (changed) {
+      setTabContents(updated);
+      // Same batch as the fresh data, so a remounted editor snapshots the new tune.
+      setTuneLoadCount((n) => n + 1);
+    }
   }
 
   /** Import an existing tune file (.msq) into the currently open project */
@@ -1775,6 +1781,7 @@ function AppContent() {
             tabs={tabs}
             tabContents={tabContents}
             setTabContents={setTabContents}
+            tuneLoadCount={tuneLoadCount}
             openProject={openProject}
             setConnectEcuWizardOpen={setConnectEcuWizardOpen}
             setImportProjectOpen={setImportProjectOpen}
