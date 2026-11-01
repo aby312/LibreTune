@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, Download, RefreshCw, Globe, Wifi, WifiOff, Save, HelpCircle, FolderOpen } from "lucide-react";
 import { Dialog, Button } from "../common";
+import type { CurrentProject } from "../../types/app";
 import "./SignatureMismatchDialog.css";
 
 export interface MatchingIniInfo {
@@ -156,22 +157,25 @@ export default function SignatureMismatchDialog({
         );
       }
       
-      // Step 2: Save the current tune with a timestamp
+      // Step 2: Save a copy of the tune into the project folder with a timestamp.
+      // A copy, not Save As: the backup must not become the file later Saves write to.
+      const project = await invoke<CurrentProject | null>("get_current_project");
+      if (!project) {
+        throw new Error("No project is open to save the backup into.");
+      }
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
       const filename = `ecu_backup_${timestamp}.msq`;
       
+      let savedPath: string;
       try {
-        await invoke("save_tune", {
-          filename,
-          includeMetadata: true, // Include metadata for complete backup
-        });
+        savedPath = await invoke<string>("save_tune_copy", { path: `${project.path}/${filename}` });
       } catch (saveError) {
         throw new Error(
           `Failed to save tune file: ${saveError instanceof Error ? saveError.message : String(saveError)}`
         );
       }
       
-      alert(`✓ ECU tune saved successfully as:\n${filename}\n\nYou can now safely switch INI files.`);
+      alert(`✓ ECU tune saved successfully as:\n${savedPath}\n\nYou can now safely switch INI files.`);
     } catch (e) {
       console.error("Failed to save ECU tune:", e);
       alert(`✗ ${e instanceof Error ? e.message : String(e)}`);

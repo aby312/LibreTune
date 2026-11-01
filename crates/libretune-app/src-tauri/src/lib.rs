@@ -146,7 +146,7 @@ use commands::realtime_stream::start_realtime_stream;
 use commands::restore_points::{
     create_restore_point, delete_restore_point, list_restore_points, load_restore_point,
 };
-use commands::save_tune::{save_tune, save_tune_as};
+use commands::save_tune::{save_tune, save_tune_as, save_tune_copy};
 use commands::sensor_calibration::{
     build_thermistor_curve, get_temperature_calibration_bins, list_calibration_presets,
     preview_afr_calibration, write_afr_calibration, write_temperature_calibration,
@@ -372,6 +372,7 @@ pub fn run() {
             new_tune,
             save_tune,
             save_tune_as,
+            save_tune_copy,
             load_tune,
             get_migration_report,
             clear_migration_report,
