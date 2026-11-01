@@ -384,4 +384,7 @@ pub struct TuneMismatchSnapshot {
     pub project_pages: HashMap<u8, Vec<u8>>,
     /// ECU page images captured at mismatch time (base for safe project merge).
     pub ecu_pages: HashMap<u8, Vec<u8>>,
+    /// The unsaved in-memory tune `project_pages` was built from; `None` when
+    /// it was built from CurrentTune.msq on disk.
+    pub unsaved_tune: Option<TuneFile>,
 }

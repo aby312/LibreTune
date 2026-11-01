@@ -77,6 +77,18 @@ pub async fn sync_ecu_data(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<SyncResult, String> {
+    sync_ecu_data_inner(state.inner(), |event, payload| {
+        let _ = app.emit(event, payload);
+    })
+    .await
+}
+
+/// The body of [`sync_ecu_data`], reachable without a `tauri::AppHandle` so a
+/// connect against the simulator is unit-testable. `emit` sends the UI events.
+pub(crate) async fn sync_ecu_data_inner(
+    state: &AppState,
+    emit: impl Fn(&str, serde_json::Value) + Send,
+) -> Result<SyncResult, String> {
     // Get definition to know page sizes
     let def_guard = state.definition.lock().await;
     let def = def_guard.as_ref().ok_or("Definition not loaded")?;
@@ -88,10 +100,17 @@ pub async fn sync_ecu_data(
     drop(def_guard);
 
     let was_modified = *state.tune_modified.lock().await;
+    // Unsaved edits exist only in memory: they, not CurrentTune.msq, are the
+    // LibreTune side of the comparison below.
+    let unsaved_tune = if was_modified {
+        state.current_tune.lock().await.clone()
+    } else {
+        None
+    };
 
     // Compare against the in-memory tune cache (authoritative editing state),
     // not the raw TuneFile which may have empty pages for MSQ-based projects.
-    let baseline_pages = snapshot_baseline_pages(state.inner()).await;
+    let baseline_pages = snapshot_baseline_pages(state).await;
 
     // Create new tune file
     let mut tune = TuneFile::new(&signature);
@@ -112,7 +131,7 @@ pub async fn sync_ecu_data(
             complete: false,
             failed_page: None,
         };
-        let _ = app.emit("sync:progress", &progress);
+        emit("sync:progress", serde_json::json!(progress));
 
         if page_size == 0 {
             pages_synced += 1;
@@ -172,7 +191,7 @@ pub async fn sync_ecu_data(
                     complete: false,
                     failed_page: Some(page_num),
                 };
-                let _ = app.emit("sync:progress", &progress);
+                emit("sync:progress", serde_json::json!(progress));
             }
         }
 
@@ -216,7 +235,7 @@ pub async fn sync_ecu_data(
         complete: true,
         failed_page: None,
     };
-    let _ = app.emit("sync:progress", &progress);
+    emit("sync:progress", serde_json::json!(progress));
 
     // Project side for compare/write must be ECU base + MSQ constants — never the
     // zero-padded cache from Load Tune (that would look like hundreds of fake diffs
@@ -232,6 +251,7 @@ pub async fn sync_ecu_data(
             }
         })
     };
+    let project_msq = unsaved_tune.clone().or(project_msq);
 
     let project_pages = {
         let def_guard = state.definition.lock().await;
@@ -253,6 +273,7 @@ pub async fn sync_ecu_data(
             *snapshot_guard = Some(TuneMismatchSnapshot {
                 project_pages: project_pages.clone(),
                 ecu_pages: ecu_tune.pages.clone(),
+                unsaved_tune,
             });
         }
         // Keep UI on the project tune until the user resolves the wizard.
@@ -274,21 +295,26 @@ pub async fn sync_ecu_data(
             }
             *state.current_tune.lock().await = Some(tune);
         }
-        let _ = app.emit(
+        emit(
             "tune:mismatch",
-            &serde_json::json!({
+            serde_json::json!({
                 "ecu_pages": ecu_page_nums,
                 "project_pages": project_page_nums,
                 "diff_pages": diff_pages,
             }),
         );
-    } else if pages_failed > 0 && !was_modified {
-        // Partial read with no local edits — restore pre-sync cache instead of leaving drift.
-        restore_baseline_pages(state.inner(), &baseline_pages).await;
+    } else if pages_failed > 0 {
+        // Partial read — restore the pre-sync cache (and any unsaved tune)
+        // instead of leaving drift.
+        restore_baseline_pages(state, &baseline_pages).await;
+        if let Some(tune) = unsaved_tune {
+            *state.current_tune.lock().await = Some(tune);
+        }
         *state.tune_mismatch_snapshot.lock().await = None;
     } else if pages_failed == 0 {
-        // Keep dirty if we repaired size scalars — user should burn once to persist.
-        if size_scalars_patched == 0 {
+        // Keep dirty if we repaired size scalars — user should burn once to persist —
+        // or if unsaved edits (now matching the ECU) are still not in CurrentTune.msq.
+        if size_scalars_patched == 0 && !was_modified {
             *state.tune_modified.lock().await = false;
         }
         *state.tune_mismatch_snapshot.lock().await = None;
@@ -319,10 +345,10 @@ pub async fn sync_ecu_data(
     // `{fuelLoadRes}`), so resolve them here too — connecting to an ECU
     // without loading a tune file must not leave load axes on the 1.0
     // parse-time fallback.
-    crate::commands::load_tune::resolve_scales_from_tune(&state).await;
+    crate::commands::load_tune::resolve_scales_from_tune(state).await;
 
     if pages_failed == 0 {
-        let _ = app.emit("tune:loaded", "ecu-sync");
+        emit("tune:loaded", "ecu-sync".into());
     }
 
     Ok(SyncResult {
