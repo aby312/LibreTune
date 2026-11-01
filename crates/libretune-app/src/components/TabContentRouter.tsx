@@ -43,7 +43,7 @@ export interface TabContentRouterProps {
   openProject: (path: string) => void | Promise<void>;
   setConnectEcuWizardOpen: (open: boolean) => void;
   setImportProjectOpen: (open: boolean) => void;
-  handleDeleteProject: (name: string) => void | Promise<void>;
+  handleDeleteProject: (path: string, name: string) => void | Promise<void>;
 
   // Editor / dialog actions
   setBurnDialogOpen: (open: boolean) => void;
