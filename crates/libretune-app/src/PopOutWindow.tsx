@@ -255,6 +255,34 @@ export default function PopOutWindow() {
     };
   }, [popOutData?.tabId]);
 
+  // A tune load (file, project, ECU sync, restore point...) replaces what the
+  // backend holds. Drop the table/curve on screen so the fetch effect above
+  // loads it again; left alone, the next cell edit writes the whole stale grid
+  // back over the new tune.
+  useEffect(() => {
+    if (popOutData?.type !== 'table' && popOutData?.type !== 'curve') return;
+
+    let cancelled = false;
+    let unlisten: UnlistenFn | null = null;
+
+    (async () => {
+      try {
+        const stop = await listen('tune:loaded', () => {
+          setPopOutData(prev => prev ? { ...prev, data: undefined } : null);
+        });
+        if (cancelled) stop();
+        else unlisten = stop;
+      } catch (e) {
+        console.error('Failed to listen for tune:loaded:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [popOutData?.type]);
+
   // Fetch constants for dialog context
   useEffect(() => {
     if (popOutData?.type === 'dialog') {
