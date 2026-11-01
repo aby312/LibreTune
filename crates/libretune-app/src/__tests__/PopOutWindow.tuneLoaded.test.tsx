@@ -2,6 +2,7 @@ import { render, waitFor, fireEvent, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import PopOutWindow from '../PopOutWindow';
+import { ToastProvider } from '../contexts/ToastContext';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({
@@ -121,7 +122,8 @@ function lastUpdateTableData() {
 
 /** Render the table pop-out and wait until it shows the grid. */
 async function renderTablePopOut() {
-  const view = render(<PopOutWindow />);
+  // main.tsx renders the pop-out inside ToastProvider; the table editor needs it.
+  const view = render(<ToastProvider><PopOutWindow /></ToastProvider>);
   await waitFor(() => expect(cellTexts(view.container)).toEqual(OLD_TEXTS));
   return view;
 }
@@ -164,7 +166,7 @@ describe('PopOutWindow reloads on tune:loaded', () => {
 
   it('reloads a curve pop-out too', async () => {
     setHash('#/popout?tabId=warmup&type=curve&title=Warmup');
-    render(<PopOutWindow />);
+    render(<ToastProvider><PopOutWindow /></ToastProvider>);
     await waitFor(() => expect(fetchCount('get_curve_data')).toBe(1));
 
     fire('tune:loaded');
