@@ -181,7 +181,7 @@ mod concurrency_tests {
     /// update_curve_data, update_table_data, and update_constant_string
     /// (2026-08-01): snapshot from `definition`, drop it, then do slow
     /// "ECU write" work.
-    fn build_state_for_lock_tests() -> Arc<AppState> {
+    pub(super) fn build_state_for_lock_tests() -> Arc<AppState> {
         let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("resources")
             .join("demo.ini");
@@ -897,5 +897,223 @@ signature = "Speeduino 2023-04"
             .err()
             .expect("err expected");
         assert!(err.contains("Factory-based connect failed"));
+    }
+}
+
+/// Connecting with unsaved offline edits (edit in the garage, then plug in)
+/// must not throw them away. Runs the real sync and the merge-and-save half of
+/// "Use LibreTune Settings" against the in-process simulator ECU.
+#[cfg(test)]
+mod connect_keeps_offline_edits_tests {
+    use super::concurrency_tests::build_state_for_lock_tests;
+    use crate::commands::sync_ecu_data::sync_ecu_data_inner;
+    use crate::commands::tune_misc::use_project_tune_inner;
+    use crate::state::AppState;
+    use libretune_core::ini::Constant;
+    use libretune_core::project::Project;
+    use libretune_core::protocol::{Connection, ConnectionConfig};
+    use libretune_core::simulator::EcuSimulator;
+    use libretune_core::tune::{TuneCache, TuneFile};
+    use std::collections::HashMap;
+
+    fn ve_of(pages: &HashMap<u8, Vec<u8>>, ve: &Constant) -> Option<Vec<u8>> {
+        let start = ve.offset as usize;
+        pages
+            .get(&ve.page)
+            .map(|p| p[start..start + ve.size_bytes()].to_vec())
+    }
+
+    /// Compares whole VE images but reports only the edited first cell.
+    fn assert_ve(got: Option<Vec<u8>>, edited: &[u8], what: &str) {
+        let head = |v: &[u8]| v[..2].to_vec();
+        assert!(
+            got.as_deref() == Some(edited),
+            "{what}: VE cell 0 is {:?}, the unsaved edit is {:?}",
+            got.as_deref().map(head),
+            head(edited)
+        );
+    }
+
+    async fn cached_ve(state: &AppState, ve: &Constant) -> Option<Vec<u8>> {
+        let cache = state.tune_cache.lock().await;
+        let len = ve.size_bytes() as u16;
+        cache
+            .as_ref()?
+            .read_bytes(ve.page, ve.offset, len)
+            .map(<[u8]>::to_vec)
+    }
+
+    /// Project open with CurrentTune.msq saved, one VE cell edited offline the
+    /// way the table editor does it (not saved), then the ECU connected (or
+    /// not). Returns the VE constant and the edited VE bytes.
+    async fn offline_edit_then_connect(
+        state: &AppState,
+        dir: &std::path::Path,
+        disk_differs_from_ecu: bool,
+        connected: bool,
+    ) -> (Constant, Vec<u8>) {
+        let def = state.definition.lock().await.clone().unwrap();
+        let mut conn = Connection::with_protocol(
+            ConnectionConfig::default(),
+            def.protocol.clone(),
+            def.endianness,
+        );
+        conn.connect_with_channel(Box::new(EcuSimulator::from_definition(&def).channel()))
+            .expect("simulator handshake");
+        let mut disk = TuneFile::new(&def.signature);
+        for page in 0..def.n_pages {
+            disk.pages
+                .insert(page, conn.read_page(page).expect("simulator page"));
+        }
+
+        let ve = def.constants["veTable"].clone();
+        let mut edited = ve_of(&disk.pages, &ve).unwrap();
+        if disk_differs_from_ecu {
+            // Saved earlier but never written to the ECU, in another VE cell.
+            *edited.last_mut().unwrap() ^= 0x10;
+            let start = ve.offset as usize;
+            disk.pages.get_mut(&ve.page).unwrap()[start..start + edited.len()]
+                .copy_from_slice(&edited);
+        }
+        let ini = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("demo.ini");
+        let project = Project::create("p", &ini, &def.signature, Some(dir)).unwrap();
+        disk.save(project.current_tune_path()).unwrap();
+
+        let mut cache = TuneCache::from_definition(&def);
+        for (page, data) in &disk.pages {
+            cache.load_page(*page, data.clone());
+        }
+        *state.current_tune.lock().await = Some(disk);
+        *state.current_project.lock().await = Some(project);
+
+        edited[0] = edited[0].wrapping_add(7);
+        let step = ve.data_type.size_bytes();
+        let values: Vec<f64> = (0..edited.len() / step)
+            .map(|i| {
+                let raw = ve
+                    .data_type
+                    .read_from_bytes(&edited, i * step, def.endianness);
+                ve.raw_to_display(raw.unwrap())
+            })
+            .collect();
+        crate::commands::table_internals::mirror_write_into_tune(
+            state, &mut cache, &ve, &edited, 0, &values,
+        )
+        .await;
+        *state.tune_cache.lock().await = Some(cache);
+        *state.connection.lock().await = connected.then_some(conn);
+        (ve, edited)
+    }
+
+    async fn assert_connect_offers_and_keeps_the_edit(disk_differs_from_ecu: bool) {
+        let state = build_state_for_lock_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let (ve, edited) =
+            offline_edit_then_connect(&state, dir.path(), disk_differs_from_ecu, true).await;
+
+        sync_ecu_data_inner(&state, |_, _| {}).await.unwrap();
+
+        let snapshot = state.tune_mismatch_snapshot.lock().await.clone();
+        let snapshot = snapshot.expect("the edit differs from the ECU: the report must open");
+        assert_ve(
+            ve_of(&snapshot.project_pages, &ve),
+            &edited,
+            "the LibreTune side of the Difference Report must be the unsaved edit",
+        );
+        let cached = cached_ve(&state, &ve).await;
+        assert_ve(cached, &edited, "the editor must still show the edit");
+        assert!(
+            *state.tune_modified.lock().await,
+            "the edit is still unsaved"
+        );
+        let ecu_page = state
+            .connection
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .read_page(ve.page);
+        let ecu_ve = ve_of(&HashMap::from([(ve.page, ecu_page.unwrap())]), &ve);
+        assert!(
+            ecu_ve != Some(edited.clone()),
+            "connecting must not write to the ECU"
+        );
+
+        use_project_tune_inner(&state).await.unwrap();
+        let path = dir.path().join("p").join("CurrentTune.msq");
+        let saved = TuneFile::load(path).unwrap().pages;
+        assert_ve(
+            ve_of(&saved, &ve),
+            &edited,
+            "Use LibreTune Settings must save the edit: that file is what it writes to the ECU",
+        );
+        assert!(
+            saved == snapshot.project_pages,
+            "Use LibreTune Settings must save exactly the pages the report compared"
+        );
+    }
+
+    /// CurrentTune.msq == ECU: no Difference Report used to open at all, the
+    /// edit was replaced by the ECU's bytes and the modified flag cleared.
+    #[tokio::test]
+    async fn connect_keeps_offline_edit_when_saved_tune_equals_ecu() {
+        assert_connect_offers_and_keeps_the_edit(false).await;
+    }
+
+    /// CurrentTune.msq != ECU: the report compared the ECU with the file on
+    /// disk, so the edit was on neither side and the cache was reset to disk.
+    #[tokio::test]
+    async fn connect_keeps_offline_edit_when_saved_tune_differs_from_ecu() {
+        assert_connect_offers_and_keeps_the_edit(true).await;
+    }
+
+    /// Unsaved edits the ECU already holds (edited online, then reconnected):
+    /// nothing to resolve, but CurrentTune.msq still lacks them.
+    #[tokio::test]
+    async fn reconnect_keeps_unsaved_edit_the_ecu_already_holds() {
+        let state = build_state_for_lock_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let (ve, edited) = offline_edit_then_connect(&state, dir.path(), false, true).await;
+        let params = libretune_core::protocol::commands::WriteMemoryParams {
+            can_id: 0,
+            page: ve.page,
+            offset: ve.offset,
+            data: edited.clone(),
+        };
+        let mut conn = state.connection.lock().await;
+        conn.as_mut().unwrap().write_memory(params).unwrap();
+        drop(conn);
+
+        sync_ecu_data_inner(&state, |_, _| {}).await.unwrap();
+
+        let snapshot = state.tune_mismatch_snapshot.lock().await.is_some();
+        assert!(!snapshot, "nothing differs from the ECU: no report");
+        let cached = cached_ve(&state, &ve).await;
+        assert_ve(cached, &edited, "the editor must still show the edit");
+        assert!(
+            *state.tune_modified.lock().await,
+            "the edit is still not in CurrentTune.msq"
+        );
+    }
+
+    /// A sync whose page reads fail must leave the unsaved tune in place too.
+    #[tokio::test]
+    async fn failed_sync_keeps_unsaved_offline_edit() {
+        let state = build_state_for_lock_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let (ve, edited) = offline_edit_then_connect(&state, dir.path(), false, false).await;
+
+        let result = sync_ecu_data_inner(&state, |_, _| {}).await.unwrap();
+
+        assert!(result.pages_failed > 0);
+        let tune = state.current_tune.lock().await.clone().unwrap();
+        assert_ve(
+            ve_of(&tune.pages, &ve),
+            &edited,
+            "the unsaved tune must survive",
+        );
+        assert!(*state.tune_modified.lock().await);
     }
 }

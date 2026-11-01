@@ -115,12 +115,11 @@ pub(crate) async fn project_tune_target(
 /// Use LibreTune / project settings: merge MSQ constants onto the ECU base, save, write, burn.
 ///
 /// Never bulk-writes zero-padded "project pages" from Load Tune — that corrupts the ECU.
-#[tauri::command]
-pub async fn use_project_tune(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    let (tune_path, ini_signature) = project_tune_target(&state).await?;
+///
+/// The merge-and-save half, reachable without a `tauri::AppHandle` so it is
+/// unit-testable; [`use_project_tune`] adds the ECU write.
+pub(crate) async fn use_project_tune_inner(state: &AppState) -> Result<(), String> {
+    let (tune_path, ini_signature) = project_tune_target(state).await?;
 
     let mut project_msq = if tune_path.exists() {
         TuneFile::load(&tune_path).map_err(|e| format!("Failed to load project tune: {}", e))?
@@ -134,6 +133,12 @@ pub async fn use_project_tune(
     let ecu_base = {
         let snapshot_guard = state.tune_mismatch_snapshot.lock().await;
         if let Some(snapshot) = snapshot_guard.as_ref() {
+            // The report offered unsaved edits as the LibreTune side: write those
+            // values, keeping the file's own structure from disk.
+            if let Some(unsaved) = &snapshot.unsaved_tune {
+                project_msq.constants = unsaved.constants.clone();
+                project_msq.pages = unsaved.pages.clone();
+            }
             snapshot.ecu_pages.clone()
         } else {
             let tune_guard = state.current_tune.lock().await;
@@ -176,6 +181,15 @@ pub async fn use_project_tune(
     *state.current_tune_path.lock().await = Some(tune_path);
     *state.tune_modified.lock().await = false;
     *state.tune_mismatch_snapshot.lock().await = None;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn use_project_tune(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    use_project_tune_inner(&state).await?;
 
     let _ = app.emit("tune:loaded", "project");
 

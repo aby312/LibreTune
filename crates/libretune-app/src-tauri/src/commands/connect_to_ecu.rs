@@ -83,10 +83,17 @@ pub async fn connect_to_ecu(
     // ponytail: reloads the whole INI on every connect. If that ever shows up
     // on a profile, gate it on the file's mtime; it is sub-ms next to the
     // multi-second connect budget today.
-    if state.connection_factory.lock().await.is_none()
-        && state.current_project.lock().await.is_some()
-    {
-        if let Some(ini_path) = load_settings(&app).last_ini_path.clone() {
+    //
+    // The open project's own INI, not `settings.last_ini_path`: opening or
+    // creating a project never updates that, so it can name another project's.
+    if state.connection_factory.lock().await.is_none() {
+        let project_ini = state
+            .current_project
+            .lock()
+            .await
+            .as_ref()
+            .map(|p| p.ini_path().to_string_lossy().into_owned());
+        if let Some(ini_path) = project_ini {
             if let Err(e) =
                 crate::commands::load_ini::load_ini(app.clone(), state.clone(), ini_path).await
             {
